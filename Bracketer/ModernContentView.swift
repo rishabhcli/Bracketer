@@ -201,7 +201,8 @@ struct ModernContentView: View {
                 if camera.isCapturing {
                     ModernCaptureProgress(
                         progress: camera.captureProgress,
-                        evStep: selectedEVStep
+                        evStep: selectedEVStep,
+                        totalShots: bracketShotCount
                     )
                 }
 
@@ -751,38 +752,60 @@ struct ModernLoadingOverlay: View {
 struct ModernCaptureProgress: View {
     let progress: Int
     let evStep: Float
-    
+    let totalShots: Int
+
+    init(progress: Int, evStep: Float, totalShots: Int = 3) {
+        self.progress = progress
+        self.evStep = evStep
+        self.totalShots = totalShots
+    }
+
+    /// Build EV offsets matching CameraController.buildBracketEVOffsets
+    private var evOffsets: [Float] {
+        switch totalShots {
+        case 3: return [-evStep, 0, +evStep]
+        case 5: return [-2*evStep, -evStep, 0, +evStep, +2*evStep]
+        case 7: return [-3*evStep, -2*evStep, -evStep, 0, +evStep, +2*evStep, +3*evStep]
+        default: return [-evStep, 0, +evStep]
+        }
+    }
+
     private var progressText: String {
-        switch progress {
-        case 0: return "Preparing bracket..."
-        case 1: return "Baseline (0 EV)"
-        case 2: return "Overexposed (+\(Int(evStep)) EV)"
-        case 3: return "Underexposed (-\(Int(evStep)) EV)"
-        case 4: return "Processing..."
-        default: return "Processing..."
+        if progress == 0 {
+            return "Preparing bracket..."
+        } else if progress <= totalShots {
+            let ev = evOffsets[progress - 1]
+            if ev == 0 {
+                return "Capturing 0 EV"
+            } else if ev > 0 {
+                return "Capturing +\(String(format: "%.1f", ev)) EV"
+            } else {
+                return "Capturing \(String(format: "%.1f", ev)) EV"
+            }
+        } else {
+            return "Processing..."
         }
     }
-    
+
     private var progressSubtext: String {
-        switch progress {
-        case 0: return "Setting up exposure bracketing"
-        case 1: return "Auto exposure reference"
-        case 2: return "Longer shutter speed"
-        case 3: return "Shorter shutter speed"
-        case 4: return "Saving bracketed sequence"
-        default: return "Finalizing capture"
+        if progress == 0 {
+            return "Setting up exposure bracketing"
+        } else if progress <= totalShots {
+            return "Shot \(progress) of \(totalShots)"
+        } else {
+            return "Saving bracketed sequence"
         }
     }
-    
+
     var body: some View {
         ZStack {
             ModernDesignSystem.Colors.cameraOverlay.ignoresSafeArea()
-            
+
             VStack(spacing: ModernDesignSystem.Spacing.lg) {
-                ProgressView(value: Double(progress), total: 4.0)
+                ProgressView(value: Double(progress), total: Double(totalShots))
                     .progressViewStyle(LinearProgressViewStyle(tint: ModernDesignSystem.Colors.cameraControlActive))
                     .frame(width: 200)
-                
+
                 VStack(spacing: ModernDesignSystem.Spacing.xs) {
                     Text(progressText)
                         .font(ModernDesignSystem.Typography.body)
@@ -791,7 +814,7 @@ struct ModernCaptureProgress: View {
                         .font(ModernDesignSystem.Typography.caption)
                         .foregroundColor(ModernDesignSystem.Colors.cameraControlSecondary)
                 }
-                
+
                 Text("Keep device steady")
                     .font(ModernDesignSystem.Typography.caption)
                     .foregroundColor(ModernDesignSystem.Colors.cameraControlSecondary)

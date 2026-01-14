@@ -790,39 +790,62 @@ extension CameraController: AVCapturePhotoCaptureDelegate {
         let loc = locationProvider.latestLocation
 
         // For bracketed capture, each photo comes through here
-        if photo.isRawPhoto {
-            let bracketLabel: String?
-            if self.sequenceStep < self.plannedEVs.count {
-                let ev = self.plannedEVs[self.sequenceStep]
-                if ev == 0 {
-                    bracketLabel = "0EV"
-                } else if ev > 0 {
-                    bracketLabel = "+\(String(format: "%.1f", ev))EV"
-                } else {
-                    bracketLabel = "\(String(format: "%.1f", ev))EV"
-                }
+        // Build bracket label for this shot
+        let bracketLabel: String?
+        let currentStep = self.sequenceStep
+        if currentStep < self.plannedEVs.count {
+            let ev = self.plannedEVs[currentStep]
+            if ev == 0 {
+                bracketLabel = "0EV"
+            } else if ev > 0 {
+                bracketLabel = "+\(String(format: "%.1f", ev))EV"
             } else {
-                bracketLabel = nil
+                bracketLabel = "\(String(format: "%.1f", ev))EV"
+            }
+        } else {
+            bracketLabel = nil
+        }
+
+        let timestamp = self.sequenceTimestamp ?? Int(Date().timeIntervalSince1970)
+        let totalShots = self.plannedEVs.count
+
+        // Handle both RAW and processed photos
+        if photo.isRawPhoto {
+            PhotoSaver.saveRAW(data: data,
+                             suggestedFilename: "Bracket-\(timestamp).dng",
+                             location: loc,
+                             bracketLabel: bracketLabel) { [weak self] assetId in
+                self?.handlePhotoSaved(assetId: assetId, bracketLabel: bracketLabel, currentStep: currentStep, totalShots: totalShots)
+            }
+        } else {
+            // Handle processed photos (HEIF/JPEG) when RAW is not available
+            PhotoSaver.saveProcessed(data: data,
+                                    suggestedFilename: "Bracket-\(timestamp).heic",
+                                    location: loc,
+                                    bracketLabel: bracketLabel) { [weak self] assetId in
+                self?.handlePhotoSaved(assetId: assetId, bracketLabel: bracketLabel, currentStep: currentStep, totalShots: totalShots)
+            }
+        }
+    }
+
+    /// Common handler for photo save completion - updates state on main queue
+    private func handlePhotoSaved(assetId: String?, bracketLabel: String?, currentStep: Int, totalShots: Int) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+
+            if let assetId = assetId {
+                self.bracketAssetIds.append(assetId)
+                Logger.photo("Saved bracket photo \(currentStep + 1)/\(totalShots): \(bracketLabel ?? "unknown")")
+            } else {
+                Logger.photo("Failed to save bracket photo \(currentStep + 1)/\(totalShots)")
             }
 
-            PhotoSaver.saveRAW(data: data,
-                             suggestedFilename: "Bracket-\(self.sequenceTimestamp ?? Int(Date().timeIntervalSince1970)).dng",
-                             location: loc,
-                             bracketLabel: bracketLabel) { assetId in
-                DispatchQueue.main.async {
-                    if let assetId = assetId {
-                        self.bracketAssetIds.append(assetId)
-                        Logger.photo("Saved bracket photo \(self.sequenceStep + 1)/\(self.plannedEVs.count): \(bracketLabel ?? "unknown")")
-                    }
-
-                    // Update progress
-                    self.sequenceStep += 1
-                    let progress = min(self.sequenceStep, self.plannedEVs.count)
-                    self.captureProgress = progress
-                    if progress < self.plannedEVs.count {
-                        HapticManager.shared.bracketShotCaptured()
-                    }
-                }
+            // Update progress
+            self.sequenceStep += 1
+            let progress = min(self.sequenceStep, totalShots)
+            self.captureProgress = progress
+            if progress < totalShots {
+                HapticManager.shared.bracketShotCaptured()
             }
         }
     }
@@ -850,17 +873,32 @@ extension CameraController: AVCapturePhotoCaptureDelegate {
 }
 
 enum PhotoSaver {
+    /// Save RAW photo data (DNG format) to Photo Library
     static func saveRAW(data: Data, suggestedFilename: String, location: CLLocation?, bracketLabel: String? = nil, completion: @escaping (String?) -> Void) {
-        let timestamp: String
+        let timestamp = extractTimestamp(from: suggestedFilename)
+        let filename = bracketLabel.map { "Bracket-\($0)-\(timestamp).dng" } ?? "Bracket-\(timestamp).dng"
+        savePhoto(data: data, filename: filename, location: location, completion: completion)
+    }
+
+    /// Save processed photo data (HEIF/JPEG format) to Photo Library
+    static func saveProcessed(data: Data, suggestedFilename: String, location: CLLocation?, bracketLabel: String? = nil, completion: @escaping (String?) -> Void) {
+        let timestamp = extractTimestamp(from: suggestedFilename)
+        let filename = bracketLabel.map { "Bracket-\($0)-\(timestamp).heic" } ?? "Bracket-\(timestamp).heic"
+        savePhoto(data: data, filename: filename, location: location, completion: completion)
+    }
+
+    /// Extract timestamp from filename or generate new one
+    private static func extractTimestamp(from suggestedFilename: String) -> String {
         if let range = suggestedFilename.range(of: #"\d+"#, options: .regularExpression),
            let extracted = Int(suggestedFilename[range]) {
-            timestamp = String(extracted)
+            return String(extracted)
         } else {
-            timestamp = String(Int(Date().timeIntervalSince1970))
+            return String(Int(Date().timeIntervalSince1970))
         }
+    }
 
-        let filename = bracketLabel.map { "Bracket-\($0)-\(timestamp).dng" } ?? "Bracket-\(timestamp).dng"
-
+    /// Common photo save implementation
+    private static func savePhoto(data: Data, filename: String, location: CLLocation?, completion: @escaping (String?) -> Void) {
         var placeholderIdentifier: String?
         PHPhotoLibrary.shared().performChanges({
             let req = PHAssetCreationRequest.forAsset()
@@ -872,7 +910,9 @@ enum PhotoSaver {
             placeholderIdentifier = req.placeholderForCreatedAsset?.localIdentifier
         }, completionHandler: { success, error in
             if !success {
-                Logger.photo("Failed to save photo: \(error?.localizedDescription ?? "Unknown error")")
+                Logger.photo("Failed to save photo '\(filename)': \(error?.localizedDescription ?? "Unknown error")")
+            } else {
+                Logger.photo("Saved photo: \(filename)")
             }
             DispatchQueue.main.async {
                 completion(success ? placeholderIdentifier : nil)
