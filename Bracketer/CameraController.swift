@@ -110,20 +110,28 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
     }
 
     private func setupOrientationObserver() {
-        guard let orientationManager = orientationManager else { return }
+        // Use Task @MainActor to safely access @MainActor-isolated properties
+        Task { @MainActor [weak self] in
+            guard let self = self, let orientationManager = self.orientationManager else { return }
 
-        // Observe orientation changes and update photo output rotation
-        orientationManager.$currentOrientation
-            .dropFirst() // Skip initial value
-            .sink { [weak self] _ in
-                guard let self = self else { return }
-                self.sessionQueue.async {
-                    self.applyRotation(to: self.photoOutput.connection(with: .video))
+            // Observe orientation changes and update photo output rotation
+            orientationManager.$currentOrientation
+                .dropFirst() // Skip initial value
+                .sink { [weak self] _ in
+                    guard let self = self else { return }
+                    // Already on main actor from publisher delivery
+                    Task { @MainActor [weak self] in
+                        guard let self = self, let orientationManager = self.orientationManager else { return }
+                        let angle = orientationManager.videoRotationAngle(for: orientationManager.effectiveOrientation)
+                        self.sessionQueue.async {
+                            self.applyRotationWithAngle(angle, to: self.photoOutput.connection(with: .video))
+                        }
+                    }
                 }
-            }
-            .store(in: &cancellables)
+                .store(in: &self.cancellables)
 
-        Logger.camera("Orientation observer connected")
+            Logger.camera("Orientation observer connected")
+        }
     }
 
     func attachPreviewLayer(_ layer: AVCaptureVideoPreviewLayer) {
@@ -132,7 +140,7 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
             layer.videoGravity = .resizeAspectFill
             // Preview layer is not rotated - stays fixed to device screen
             // Only photo output connection is rotated via OrientationManager
-            self.applyRotation(to: self.photoOutput.connection(with: .video))
+            self.applyRotationAsync(to: self.photoOutput.connection(with: .video))
         }
     }
 
@@ -155,7 +163,6 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
         locationProvider.start()
 
         main {
-            self.updateUIOrientationFromScene()
             self.isInitializing = false
             // Invalidate existing timer before creating a new one to prevent leaks
             self.exposureUpdateTimer?.invalidate()
@@ -208,7 +215,7 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
         }
         sessionQueue.async {
             // Apply rotation to photo output (not preview layer)
-            self.applyRotation(to: self.photoOutput.connection(with: .video))
+            self.applyRotationAsync(to: self.photoOutput.connection(with: .video))
             self.applyZoomForSelectedCamera(kind: initialKind)
         }
     }
@@ -277,7 +284,7 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
             self.session.commitConfiguration()
 
             // Apply rotation to photo output after camera switch
-            self.applyRotation(to: self.photoOutput.connection(with: .video))
+            self.applyRotationAsync(to: self.photoOutput.connection(with: .video))
             self.applyZoomForSelectedCamera(kind: kind)
             self.main { self.selectedCamera = kind }
         }
@@ -391,14 +398,10 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
         Logger.photo("ProRAW supported: \(self.photoOutput.isAppleProRAWSupported), available RAW types: \(self.photoOutput.availableRawPhotoPixelFormatTypes.count), enabled: \(self.photoOutput.isAppleProRAWEnabled)")
     }
 
-    /// Apply video rotation based on current orientation from OrientationManager
+    /// Apply video rotation with pre-computed angle (thread-safe, can be called from sessionQueue)
     /// Note: We do not rotate the preview layer - only the photo output connection
-    private func applyRotation(to connection: AVCaptureConnection?) {
-        guard let conn = connection, let orientationManager = orientationManager else { return }
-
-        // Use effective orientation (respects orientation lock during capture)
-        let orientation = orientationManager.effectiveOrientation
-        let angle = orientationManager.videoRotationAngle(for: orientation)
+    private func applyRotationWithAngle(_ angle: CGFloat, to connection: AVCaptureConnection?) {
+        guard let conn = connection else { return }
 
         if conn.isVideoRotationAngleSupported(angle) {
             conn.videoRotationAngle = angle
@@ -408,7 +411,19 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
             conn.isVideoMirrored = false
         }
 
-        Logger.camera("Applied rotation: \(angle)° for orientation: \(orientation.debugDescription)")
+        Logger.camera("Applied rotation: \(angle)°")
+    }
+
+    /// Apply rotation by fetching orientation from main actor and dispatching to sessionQueue
+    /// Must be called when you need fresh orientation data
+    private func applyRotationAsync(to connection: AVCaptureConnection?) {
+        Task { @MainActor in
+            guard let orientationManager = self.orientationManager else { return }
+            let angle = orientationManager.videoRotationAngle(for: orientationManager.effectiveOrientation)
+            self.sessionQueue.async {
+                self.applyRotationWithAngle(angle, to: connection)
+            }
+        }
     }
 
     private func applyZoomForSelectedCamera(kind: CameraKind? = nil) {
@@ -494,7 +509,7 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
             // Wait for AE to settle before capturing bracket
             self.settleAutoExposure { [weak self] in
                 guard let self = self else { return }
-                self.applyRotation(to: self.photoOutput.connection(with: .video))
+                self.applyRotationAsync(to: self.photoOutput.connection(with: .video))
                 self.main {
                     self.isCapturing = true
                     self.captureProgress = 0
@@ -658,7 +673,8 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
         self.rawPixelFormat = nil
         self.sequenceTimestamp = nil
 
-        main {
+        Task { @MainActor [weak self] in
+            guard let self = self else { return }
             self.isCapturing = false
             self.captureProgress = 0
             // Unlock orientation after bracket capture completes

@@ -68,6 +68,7 @@ struct ModernContentView: View {
                         ModernCameraPreview(
                             camera: camera,
                             motionManager: motionManager,
+                            orientationManager: orientationManager,
                             showGrid: showGrid,
                             gridType: gridType,
                             showLevel: showLevel,
@@ -107,6 +108,7 @@ struct ModernContentView: View {
                         ModernCameraPreview(
                             camera: camera,
                             motionManager: motionManager,
+                            orientationManager: orientationManager,
                             showGrid: showGrid,
                             gridType: gridType,
                             showLevel: showLevel,
@@ -324,6 +326,7 @@ struct ModernContentView: View {
 struct ModernCameraPreview: View {
     let camera: CameraController
     @ObservedObject var motionManager: MotionLevelManager
+    @ObservedObject var orientationManager: OrientationManager
     let showGrid: Bool
     let gridType: GridType
     let showLevel: Bool
