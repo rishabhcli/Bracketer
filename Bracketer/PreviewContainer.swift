@@ -51,6 +51,7 @@ struct PreviewContainer: View {
     var showGrid: Bool = true
     var levelAngle: Double = 0
     var showHistogram: Bool = false
+    var histogramData: HistogramData? = nil
     var focusPeakingEnabled: Bool = false
     var focusPeakingColor: Color = .red
     var focusPeakingIntensity: Float = 0.5
@@ -96,7 +97,7 @@ struct PreviewContainer: View {
                     }
 
                     if showHistogram {
-                        HistogramOverlay()
+                        HistogramOverlay(histogramData: histogramData)
                             .allowsHitTesting(false)
                     }
 
@@ -311,22 +312,10 @@ struct HistogramOverlay: View {
     @State private var currentMode: HistogramMode = .rgbHistogram
     @State private var isExpanded = false
 
-    // Simulated histogram data - in real implementation, this would come from camera feed analysis
-    private let histogramData: HistogramData
+    let histogramData: HistogramData?
 
-    init() {
-        // Generate sample histogram data
-        let red = (0..<256).map { _ in Float.random(in: 0...1) }
-        let green = (0..<256).map { _ in Float.random(in: 0...1) }
-        let blue = (0..<256).map { _ in Float.random(in: 0...1) }
-        let redGreen = zip(red, green)
-        let redGreenBlue = zip(redGreen, blue)
-        let luminance = redGreenBlue.map { (rg, b) -> Float in
-            let (r, g) = rg
-            return r * 0.2126 + g * 0.7152 + b * 0.0722
-        }
-
-        histogramData = HistogramData(red: red, green: green, blue: blue, luminance: luminance)
+    init(histogramData: HistogramData? = nil) {
+        self.histogramData = histogramData
     }
 
     var body: some View {
@@ -402,13 +391,19 @@ struct HistogramOverlay: View {
                         HistogramGrid()
 
                         // Data visualization
-                        switch currentMode {
-                        case .rgbHistogram:
-                            RGBHistogramView(data: histogramData, height: isExpanded ? 120 : 60)
-                        case .luminanceWaveform:
-                            LuminanceWaveformView(data: histogramData, height: isExpanded ? 120 : 60)
-                        case .rgbWaveform:
-                            RGBWaveformView(data: histogramData, height: isExpanded ? 120 : 60)
+                        if let data = histogramData {
+                            switch currentMode {
+                            case .rgbHistogram:
+                                RGBHistogramView(data: data, height: isExpanded ? 120 : 60)
+                            case .luminanceWaveform:
+                                LuminanceWaveformView(data: data, height: isExpanded ? 120 : 60)
+                            case .rgbWaveform:
+                                RGBWaveformView(data: data, height: isExpanded ? 120 : 60)
+                            }
+                        } else {
+                            Text("Analyzing...")
+                                .font(.system(size: 11))
+                                .foregroundColor(.white.opacity(0.5))
                         }
                     }
                     .frame(height: isExpanded ? 120 : 60)

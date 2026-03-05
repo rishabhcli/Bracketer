@@ -326,6 +326,8 @@ struct ModernCameraSettings: View {
 
 // MARK: - Modern About Section
 struct ModernAboutSection: View {
+    @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = true
+
     var body: some View {
         ModernSettingsCard(
             title: "About",
@@ -337,6 +339,14 @@ struct ModernAboutSection: View {
                 title: "Version",
                 value: "1.0.0",
                 action: {}
+            )
+            ModernSettingRow(
+                icon: "book.fill",
+                title: "Show Tutorial",
+                value: "",
+                action: {
+                    hasCompletedOnboarding = false
+                }
             )
         }
     }

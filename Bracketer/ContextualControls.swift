@@ -22,7 +22,7 @@ enum ControlContext {
 }
 
 // MARK: - Context-Aware Bottom Controls
-@available(iOS 26.0, *)
+@available(iOS 26.2, *)
 struct ContextualBottomControls: View {
     let camera: CameraController
     @Binding var showProControls: Bool
@@ -244,81 +244,5 @@ struct EVStepQuickSelector: View {
                 .buttonStyle(.plain)
             }
         }
-    }
-}
-
-// MARK: - Legacy (Pre-iOS 26) Contextual Controls
-struct ContextualBottomControlsLegacy: View {
-    let camera: CameraController
-    @Binding var showProControls: Bool
-    @Binding var showSettings: Bool
-    @Binding var selectedEVStep: Float
-    @Binding var currentEVCompensation: Float
-    @Binding var evCompensationLocked: Bool
-    @Binding var focusPeakingEnabled: Bool
-    @Binding var focusPeakingColor: Color
-    @Binding var focusPeakingIntensity: Float
-    @Binding var bracketShotCount: Int
-    @Binding var flashMode: FlashMode
-    @Binding var timerMode: TimerMode
-    @Binding var isGridActive: Bool
-    @Binding var isLevelActive: Bool
-    @Binding var currentShootingMode: ShootingMode
-    let onGridToggle: () -> Void
-    let onLevelToggle: () -> Void
-
-    private var context: ControlContext {
-        ControlContext.from(mode: currentShootingMode)
-    }
-
-    var body: some View {
-        VStack(spacing: 16) {
-            // Context-aware secondary controls row
-            contextualSecondaryControls
-
-            // Main control row
-            HStack(spacing: 44) {
-                ModernPhotoLibraryButton(camera: camera)
-
-                ModernShutterButton(
-                    isCapturing: camera.isCapturing,
-                    progress: camera.captureProgress,
-                    totalSteps: bracketShotCount
-                ) {
-                    camera.captureLockdownBracket(evStep: selectedEVStep, shotCount: bracketShotCount)
-                }
-
-                ModernSettingsButton(showSettings: $showSettings)
-            }
-            .padding(.horizontal, 20)
-            .padding(.bottom, 40)
-        }
-    }
-
-    @ViewBuilder
-    private var contextualSecondaryControls: some View {
-        HStack(spacing: 20) {
-            switch context {
-            case .auto:
-                ModernFlashButton(flashMode: $flashMode)
-                ModernTimerButton(timerMode: $timerMode)
-                Spacer()
-                    .frame(width: 8)
-                ModernToggleButton(icon: "square.grid.3x3", isActive: isGridActive, onTap: onGridToggle)
-                ModernToggleButton(icon: "level", isActive: isLevelActive, onTap: onLevelToggle)
-
-            case .manual:
-                // Manual mode: fewer controls, focus on pro
-                ModernToggleButton(icon: "level", isActive: isLevelActive, onTap: onLevelToggle)
-                Spacer()
-
-            case .bracket, .night:
-                ModernTimerButton(timerMode: $timerMode)
-                ModernToggleButton(icon: "level", isActive: isLevelActive, onTap: onLevelToggle)
-                Spacer()
-            }
-        }
-        .padding(.horizontal, 24)
-        .transition(.opacity.combined(with: .move(edge: .top)))
     }
 }

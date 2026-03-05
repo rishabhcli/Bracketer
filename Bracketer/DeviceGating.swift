@@ -1,38 +1,100 @@
 import UIKit
 import SwiftUI
+import AVFoundation
 
-/// Device compatibility gating system for iPhone 17 Pro Max with iOS 26+
-/// Enforces hardware and software requirements for advanced camera features
+/// Capability level determines which features are available
+enum DeviceCapabilityLevel {
+    case full       // All lenses + ProRAW (iPhone 15/16/17 Pro)
+    case standard   // Multiple lenses, no ProRAW
+    case basic      // Wide lens only
+    case unsupported // No camera or too-old OS
+}
+
+/// Device compatibility gating system using capability-based detection
+/// Supports any iPhone with adequate camera hardware instead of hardcoded model
 final class DeviceGating: ObservableObject {
     static let shared = DeviceGating()
-    
+
     @Published var isCompatibleDevice = false
+    @Published var capabilityLevel: DeviceCapabilityLevel = .unsupported
     @Published var deviceModel: String = ""
     @Published var iosVersion: String = ""
     @Published var compatibilityMessage: String = ""
-    
+
     private init() {
         checkDeviceCompatibility()
     }
-    
+
     private func checkDeviceCompatibility() {
-        // Get device model identifier
         deviceModel = getDeviceModelIdentifier()
         iosVersion = UIDevice.current.systemVersion
 
-        // Allow simulators for development
         #if targetEnvironment(simulator)
         isCompatibleDevice = true
+        capabilityLevel = .full
         #else
-        let isCorrectDevice = deviceModel == "iPhone17,1" // iPhone 17 Pro Max
         let isCorrectOS = compareVersion(iosVersion, "26.0") >= 0
 
-        isCompatibleDevice = isCorrectDevice && isCorrectOS
+        if !isCorrectOS {
+            isCompatibleDevice = false
+            capabilityLevel = .unsupported
+            generateCompatibilityMessage(deviceOK: true, osOK: false)
+            return
+        }
 
-        if !isCompatibleDevice {
-            generateCompatibilityMessage(deviceOK: isCorrectDevice, osOK: isCorrectOS)
+        capabilityLevel = detectCameraCapabilities()
+
+        switch capabilityLevel {
+        case .full, .standard:
+            isCompatibleDevice = true
+        case .basic:
+            // Allow basic devices but with reduced features
+            isCompatibleDevice = true
+            compatibilityMessage = "Some features may be limited on this device. For the best experience, use an iPhone with multiple camera lenses."
+        case .unsupported:
+            isCompatibleDevice = false
+            generateCompatibilityMessage(deviceOK: false, osOK: isCorrectOS)
         }
         #endif
+    }
+
+    private func detectCameraCapabilities() -> DeviceCapabilityLevel {
+        let discovery = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.builtInWideAngleCamera, .builtInUltraWideCamera, .builtInTelephotoCamera],
+            mediaType: .video,
+            position: .back
+        )
+        let deviceTypes = Set(discovery.devices.map { $0.deviceType })
+
+        let hasWide = deviceTypes.contains(.builtInWideAngleCamera)
+        let hasUltraWide = deviceTypes.contains(.builtInUltraWideCamera)
+        let hasTelephoto = deviceTypes.contains(.builtInTelephotoCamera)
+
+        guard hasWide else { return .unsupported }
+
+        // Check ProRAW support
+        let hasProRAW: Bool = {
+            guard let wideDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) else { return false }
+            let output = AVCapturePhotoOutput()
+            let session = AVCaptureSession()
+            session.beginConfiguration()
+            if let input = try? AVCaptureDeviceInput(device: wideDevice), session.canAddInput(input) {
+                session.addInput(input)
+            }
+            if session.canAddOutput(output) {
+                session.addOutput(output)
+            }
+            session.commitConfiguration()
+            return output.isAppleProRAWSupported
+        }()
+
+        if (hasUltraWide || hasTelephoto) && hasProRAW {
+            return .full
+        } else if hasUltraWide || hasTelephoto {
+            return .standard
+        } else {
+            return .basic
+        }
     }
     
     private func getDeviceModelIdentifier() -> String {
@@ -70,30 +132,26 @@ final class DeviceGating: ObservableObject {
         switch (deviceOK, osOK) {
         case (false, false):
             compatibilityMessage = """
-            This app requires iPhone 17 Pro Max with iOS 26 or later.
-            
+            This app requires an iPhone with a camera and iOS 26 or later.
+
             Current device: \(getDeviceDisplayName())
             Current iOS version: \(iosVersion)
-            
-            Required: iPhone 17 Pro Max with iOS 26.0+
             """
         case (false, true):
             compatibilityMessage = """
-            This app requires iPhone 17 Pro Max hardware.
-            
+            This app requires an iPhone with a supported camera system.
+
             Current device: \(getDeviceDisplayName())
-            iOS version: \(iosVersion) ✓
-            
-            The advanced camera features and 48MP sensor capabilities are only available on iPhone 17 Pro Max.
+            iOS version: \(iosVersion)
             """
         case (true, false):
             compatibilityMessage = """
             This app requires iOS 26 or later.
-            
-            Device: iPhone 17 Pro Max ✓
+
+            Device: \(getDeviceDisplayName())
             Current iOS version: \(iosVersion)
-            
-            Please update to iOS 26.0 or later to access the latest camera APIs and computational photography features.
+
+            Please update to iOS 26.0 or later to access the latest camera APIs.
             """
         case (true, true):
             compatibilityMessage = ""
@@ -172,7 +230,7 @@ struct IncompatibleDeviceView: View {
                             .fontWeight(.bold)
                             .foregroundColor(.white)
                         
-                        Text("iPhone 17 Pro Max Required")
+                        Text("Compatible Device Required")
                             .font(ModernDesignSystem.Typography.title2)
                             .foregroundColor(.white.opacity(0.8))
                     }
@@ -226,7 +284,7 @@ struct IncompatibleDeviceView: View {
                             .font(ModernDesignSystem.Typography.caption)
                             .foregroundColor(.white.opacity(0.6))
                         
-                        Text("iPhone 17 Pro Max • iOS 26.0+")
+                        Text("iPhone with camera • iOS 26.0+")
                             .font(ModernDesignSystem.Typography.caption2)
                             .foregroundColor(.white.opacity(0.5))
                     }

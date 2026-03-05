@@ -15,6 +15,7 @@ struct ImageViewer: View {
     @State private var isLoading = false
     @State private var currentImage: UIImage?
     @State private var currentMetadata: [String: Any]?
+    @State private var showDeleteConfirmation = false
 
     private let imageManager = PHCachingImageManager()
 
@@ -84,6 +85,7 @@ struct ImageViewer: View {
                             )
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Close")
 
                     Spacer()
 
@@ -130,6 +132,8 @@ struct ImageViewer: View {
                             )
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Photo Info")
+                    .accessibilityValue(showMetadata ? "Showing" : "Hidden")
                 }
                 .padding(.horizontal, 20)
                 .padding(.top, 60)
@@ -178,9 +182,10 @@ struct ImageViewer: View {
                                 )
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel("Share Photo")
 
                         Button {
-                            deleteCurrentImage()
+                            showDeleteConfirmation = true
                         } label: {
                             Image(systemName: "trash")
                                 .font(.system(size: 20, weight: .medium))
@@ -192,6 +197,7 @@ struct ImageViewer: View {
                                 )
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel("Delete Photo")
                     }
                 }
                 .padding(.horizontal, 20)
@@ -203,6 +209,14 @@ struct ImageViewer: View {
                 EXIFViewer(asset: bracketAssets[currentIndex], metadata: metadata, image: image)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
+        }
+        .confirmationDialog("Delete Photo?", isPresented: $showDeleteConfirmation, titleVisibility: .visible) {
+            Button("Delete", role: .destructive) {
+                deleteCurrentImage()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This photo will be permanently deleted from your library.")
         }
         .onAppear {
             loadImage(at: currentIndex)
@@ -261,12 +275,54 @@ struct ImageViewer: View {
     }
 
     private func shareCurrentImage() {
-        guard let image = currentImage else { return }
+        guard currentIndex >= 0 && currentIndex < bracketAssets.count else { return }
 
-        let activityVC = UIActivityViewController(activityItems: [image], applicationActivities: nil)
+        let asset = bracketAssets[currentIndex]
+        let resources = PHAssetResource.assetResources(for: asset)
+
+        // Prefer original RAW file, fall back to first available resource
+        let resource = resources.first { $0.type == .alternatePhoto } ?? resources.first
+        guard let fileResource = resource else {
+            // Fall back to sharing the UIImage if no resource found
+            if let image = currentImage {
+                presentShareSheet(items: [image])
+            }
+            return
+        }
+
+        let tempDir = FileManager.default.temporaryDirectory
+        let fileName = fileResource.originalFilename
+        let tempURL = tempDir.appendingPathComponent(fileName)
+
+        // Clean up any existing temp file
+        try? FileManager.default.removeItem(at: tempURL)
+
+        let options = PHAssetResourceRequestOptions()
+        options.isNetworkAccessAllowed = true
+
+        PHAssetResourceManager.default().writeData(for: fileResource, toFile: tempURL, options: options) { error in
+            DispatchQueue.main.async {
+                if let error = error {
+                    Logger.error("Failed to export photo for sharing: \(error.localizedDescription)")
+                    // Fall back to UIImage sharing
+                    if let image = self.currentImage {
+                        self.presentShareSheet(items: [image])
+                    }
+                } else {
+                    self.presentShareSheet(items: [tempURL])
+                }
+            }
+        }
+    }
+
+    private func presentShareSheet(items: [Any]) {
+        let activityVC = UIActivityViewController(activityItems: items, applicationActivities: nil)
 
         if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
            let window = windowScene.windows.first {
+            // iPad popover anchor
+            activityVC.popoverPresentationController?.sourceView = window
+            activityVC.popoverPresentationController?.sourceRect = CGRect(x: window.bounds.midX, y: window.bounds.maxY - 100, width: 0, height: 0)
             window.rootViewController?.present(activityVC, animated: true)
         }
     }
@@ -281,11 +337,22 @@ struct ImageViewer: View {
         } completionHandler: { success, error in
             if success {
                 DispatchQueue.main.async {
+                    Logger.photo("Deleted bracket photo at index \(self.currentIndex)")
                     HapticManager.shared.gridTypeChanged()
-                    // This would trigger a refresh of the bracket list
+                    // If no photos remain, dismiss the viewer
+                    if self.bracketAssets.count <= 1 {
+                        self.onDismiss()
+                    } else if self.currentIndex >= self.bracketAssets.count - 1 {
+                        // Was last photo — move to previous
+                        self.currentIndex = max(0, self.currentIndex - 1)
+                        self.loadImage(at: self.currentIndex)
+                    } else {
+                        // Reload current index (next photo slides into place)
+                        self.loadImage(at: self.currentIndex)
+                    }
                 }
             } else if let error = error {
-                print("Failed to delete asset: \(error)")
+                Logger.error("Failed to delete asset: \(error.localizedDescription)")
             }
         }
     }
@@ -350,6 +417,7 @@ struct ImageViewerContent: View {
                         }
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .accessibilityLabel("Photo \(currentIndex + 1) of \(bracketAssets.count)")
         }
     }
 }

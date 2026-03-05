@@ -3,6 +3,7 @@
 
 import SwiftUI
 
+@available(iOS 26.2, *)
 @main
 struct BracketerApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
@@ -12,13 +13,19 @@ struct BracketerApp: App {
         AppDelegate.orientationLock = .all
     }
 
+    @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
+
     var body: some Scene {
         WindowGroup {
-            ModernContentView()
-                .onAppear {
-                    // Support all orientations for camera
-                    AppDelegate.orientationLock = .all
-                }
+            if hasCompletedOnboarding {
+                ModernContentView()
+                    .onAppear {
+                        // Support all orientations for camera
+                        AppDelegate.orientationLock = .all
+                    }
+            } else {
+                OnboardingView()
+            }
         }
     }
 }

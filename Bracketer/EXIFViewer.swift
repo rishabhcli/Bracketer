@@ -318,20 +318,62 @@ struct EXIFViewer: View {
     }
 
     private func generateHistogramData() {
-        guard image != nil else { return }
+        guard let cgImage = image?.cgImage else { return }
 
-        // Generate histogram data from the image
-        let red = (0..<256).map { _ in Float.random(in: 0...1) }
-        let green = (0..<256).map { _ in Float.random(in: 0...1) }
-        let blue = (0..<256).map { _ in Float.random(in: 0...1) }
-        let redGreen = zip(red, green)
-        let redGreenBlue = zip(redGreen, blue)
-        let luminance = redGreenBlue.map { (rg, b) -> Float in
-            let (r, g) = rg
-            return r * 0.2126 + g * 0.7152 + b * 0.0722
+        let width = cgImage.width
+        let height = cgImage.height
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bytesPerPixel: Int = 4
+        let bytesPerRow: Int = bytesPerPixel * width
+        var pixelData = [UInt8](repeating: 0, count: Int(height * bytesPerRow))
+
+        guard let context = CGContext(
+            data: &pixelData,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return }
+
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        var redBins = [Int](repeating: 0, count: 256)
+        var greenBins = [Int](repeating: 0, count: 256)
+        var blueBins = [Int](repeating: 0, count: 256)
+        var lumBins = [Int](repeating: 0, count: 256)
+
+        // Sample every 4th pixel in both dimensions for performance
+        let step = 4
+        for y in stride(from: 0, to: height, by: step) {
+            let rowOffset = y * bytesPerRow
+            for x in stride(from: 0, to: width, by: step) {
+                let offset = rowOffset + x * bytesPerPixel
+                let r = Int(pixelData[offset])
+                let g = Int(pixelData[offset + 1])
+                let b = Int(pixelData[offset + 2])
+
+                redBins[r] += 1
+                greenBins[g] += 1
+                blueBins[b] += 1
+
+                let lum = Int(Float(r) * 0.2126 + Float(g) * 0.7152 + Float(b) * 0.0722)
+                lumBins[min(255, lum)] += 1
+            }
         }
 
-        histogramData = HistogramData(red: red, green: green, blue: blue, luminance: luminance)
+        let maxR = Float(redBins.max() ?? 1)
+        let maxG = Float(greenBins.max() ?? 1)
+        let maxB = Float(blueBins.max() ?? 1)
+        let maxL = Float(lumBins.max() ?? 1)
+
+        histogramData = HistogramData(
+            red: redBins.map { Float($0) / maxR },
+            green: greenBins.map { Float($0) / maxG },
+            blue: blueBins.map { Float($0) / maxB },
+            luminance: lumBins.map { Float($0) / maxL }
+        )
     }
 
     private func formatAperture(_ value: Double?) -> String {

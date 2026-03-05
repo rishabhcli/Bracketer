@@ -4,7 +4,7 @@ import SwiftUI
 /// Apple Camera app inspired pro controls with iOS 26 Liquid Glass design
 /// Implements tinted glass effects for professional photography controls
 
-@available(iOS 26.0, *)
+@available(iOS 26.2, *)
 struct ModernProControls: View {
     let camera: CameraController
     @Binding var showProControls: Bool
@@ -77,6 +77,7 @@ struct ModernProControls: View {
                     ScrollView {
                         VStack(spacing: 20) {
                             ModernExposureControls(
+                                camera: camera,
                                 manualISO: $manualISO,
                                 manualShutterSpeed: $manualShutterSpeed,
                                 whiteBalance: $whiteBalance,
@@ -84,6 +85,7 @@ struct ModernProControls: View {
                             )
 
                             ModernFocusControls(
+                                camera: camera,
                                 manualFocus: $manualFocus,
                                 focusPeakingEnabled: $focusPeakingEnabled,
                                 focusPeakingColor: $focusPeakingColor,
@@ -153,6 +155,7 @@ struct ModernProControls: View {
 
 @available(iOS 26.0, *)
 struct ModernExposureControls: View {
+    @ObservedObject var camera: CameraController
     @Binding var manualISO: Float
     @Binding var manualShutterSpeed: Float
     @Binding var whiteBalance: Float
@@ -196,7 +199,7 @@ struct ModernExposureControls: View {
                     ModernSliderControl(
                         title: "ISO",
                         value: $manualISO,
-                        range: 25...25600,
+                        range: camera.minISO...camera.maxISO,
                         step: 25,
                         format: { "\(Int($0))" },
                         color: .yellow
@@ -206,7 +209,7 @@ struct ModernExposureControls: View {
                     ModernSliderControl(
                         title: "Shutter",
                         value: $manualShutterSpeed,
-                        range: 0.0005...30,
+                        range: camera.minShutterSpeed...camera.maxShutterSpeed,
                         step: 0.001,
                         format: formatShutterSpeed,
                         color: .cyan
@@ -227,6 +230,15 @@ struct ModernExposureControls: View {
         }
         .padding(20)
         .proSectionCard(tint: .yellow)
+        .onChange(of: manualISO) { _, newValue in
+            camera.setManualISO(newValue)
+        }
+        .onChange(of: manualShutterSpeed) { _, newValue in
+            camera.setManualShutterSpeed(newValue)
+        }
+        .onChange(of: whiteBalance) { _, newValue in
+            camera.setManualWhiteBalance(temperature: newValue)
+        }
     }
 
     private func formatShutterSpeed(_ duration: Float) -> String {
@@ -247,6 +259,7 @@ struct ModernExposureControls: View {
 
 @available(iOS 26.0, *)
 struct ModernFocusControls: View {
+    @ObservedObject var camera: CameraController
     @Binding var manualFocus: Float
     @Binding var focusPeakingEnabled: Bool
     @Binding var focusPeakingColor: Color
@@ -375,6 +388,9 @@ struct ModernFocusControls: View {
         }
         .padding(20)
         .proSectionCard(tint: .green)
+        .onChange(of: manualFocus) { _, newValue in
+            camera.setManualFocus(position: newValue)
+        }
     }
 }
 
@@ -568,6 +584,8 @@ struct ModernSliderControl: View {
                 }
             }
             .accentColor(color)
+            .accessibilityLabel(title)
+            .accessibilityValue(format(value))
         }
         .padding(12)
         .background(

@@ -29,7 +29,7 @@ final class MotionLevelManager: NSObject, ObservableObject {
         }
         
         // Configure motion updates for camera use
-        motionManager.deviceMotionUpdateInterval = 1.0 / 30.0 // 30 FPS for smooth leveling
+        motionManager.deviceMotionUpdateInterval = 1.0 / 10.0 // 10 FPS sufficient for level indicator
         motionManager.showsDeviceMovementDisplay = true
         
         motionManager.startDeviceMotionUpdates(

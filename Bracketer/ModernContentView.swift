@@ -9,32 +9,16 @@ struct ModernContentView: View {
     @StateObject private var camera = CameraController()
     @StateObject private var motionManager = MotionLevelManager()
     @StateObject private var orientationManager = OrientationManager()
+    @StateObject private var settings = SettingsStore()
 
-    // UI State
+    // Transient UI state (not persisted)
     @State private var showProControls = false
     @State private var showSettings = false
-    @State private var showGrid = true
-    @State private var showLevel = true
-    @State private var focusPeakingEnabled = false
-    @State private var focusPeakingColor = Color.red
-    @State private var focusPeakingIntensity: Float = 0.5
-    
-    // Bracketing
-    @State private var selectedEVStep: Float = 1.0
-    @State private var currentEVCompensation: Float = 0.0
-    @State private var evCompensationLocked = false
-    @State private var bracketShotCount: Int = 3
-    
-    // Shooting modes
-    @State private var currentShootingMode: ShootingMode = .auto
-    @State private var gridType: GridType = .ruleOfThirds
     @State private var showModeChangeToast = false
     @State private var previousMode: ShootingMode = .auto
-
-    // Camera controls (iOS 26+)
     @State private var selectedZoom: CameraZoomLevel = .wide
-    @State private var flashMode: FlashMode = .off
-    @State private var timerMode: TimerMode = .off
+    @State private var currentEVCompensation: Float = 0.0
+    @State private var evCompensationLocked = false
 
     // Focus peaking colors
     private let focusPeakingColors: [Color] = [.red, .blue, .yellow, .green, .orange, .purple, .white]
@@ -45,6 +29,8 @@ struct ModernContentView: View {
     var body: some View {
         GeometryReader { geometry in
             let isLandscape = orientationManager.isLandscape
+            let safeTop = geometry.safeAreaInsets.top
+            let safeBottom = geometry.safeAreaInsets.bottom
             ZStack {
                 if isLandscape {
                     // In landscape, avoid overlaying controls on top of the preview:
@@ -52,29 +38,29 @@ struct ModernContentView: View {
                     VStack(spacing: 0) {
                         ModernTopBarEnhanced(
                             camera: camera,
-                            currentShootingMode: $currentShootingMode,
-                            selectedEVStep: selectedEVStep,
+                            currentShootingMode: $settings.currentShootingMode,
+                            selectedEVStep: settings.selectedEVStep,
                             showProControls: $showProControls,
-                            flashMode: $flashMode,
-                            timerMode: $timerMode,
-                            isGridActive: showGrid,
-                            isLevelActive: showLevel,
+                            flashMode: $settings.flashMode,
+                            timerMode: $settings.timerMode,
+                            isGridActive: settings.showGrid,
+                            isLevelActive: settings.showLevel,
                             onGridToggle: toggleGrid,
                             onLevelToggle: toggleLevel
                         )
-                        .padding(.top, 16)
+                        .padding(.top, safeTop + 8)
                         .padding(.horizontal, 16)
 
                         ModernCameraPreview(
                             camera: camera,
                             motionManager: motionManager,
                             orientationManager: orientationManager,
-                            showGrid: showGrid,
-                            gridType: gridType,
-                            showLevel: showLevel,
-                            focusPeakingEnabled: focusPeakingEnabled,
-                            focusPeakingColor: focusPeakingColor,
-                            focusPeakingIntensity: focusPeakingIntensity
+                            showGrid: settings.showGrid,
+                            gridType: settings.gridType,
+                            showLevel: settings.showLevel,
+                            focusPeakingEnabled: settings.focusPeakingEnabled,
+                            focusPeakingColor: settings.focusPeakingColor,
+                            focusPeakingIntensity: settings.focusPeakingIntensity
                         )
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -82,24 +68,24 @@ struct ModernContentView: View {
                             camera: camera,
                             showProControls: $showProControls,
                             showSettings: $showSettings,
-                            selectedEVStep: $selectedEVStep,
+                            selectedEVStep: $settings.selectedEVStep,
                             currentEVCompensation: $currentEVCompensation,
                             evCompensationLocked: $evCompensationLocked,
-                            focusPeakingEnabled: $focusPeakingEnabled,
-                            focusPeakingColor: $focusPeakingColor,
-                            focusPeakingIntensity: $focusPeakingIntensity,
-                            bracketShotCount: $bracketShotCount,
+                            focusPeakingEnabled: $settings.focusPeakingEnabled,
+                            focusPeakingColor: $settings.focusPeakingColor,
+                            focusPeakingIntensity: $settings.focusPeakingIntensity,
+                            bracketShotCount: $settings.bracketShotCount,
                             selectedZoom: $selectedZoom,
-                            flashMode: $flashMode,
-                            timerMode: $timerMode,
-                            isGridActive: $showGrid,
-                            isLevelActive: $showLevel,
-                            currentShootingMode: $currentShootingMode,
+                            flashMode: $settings.flashMode,
+                            timerMode: $settings.timerMode,
+                            isGridActive: $settings.showGrid,
+                            isLevelActive: $settings.showLevel,
+                            currentShootingMode: $settings.currentShootingMode,
                             onGridToggle: toggleGrid,
                             onLevelToggle: toggleLevel
                         )
                         .padding(.horizontal, 20)
-                        .padding(.bottom, 20)
+                        .padding(.bottom, safeBottom + 20)
                     }
                 } else {
                     // Portrait: keep the classic overlay layout (top bar and bottom controls
@@ -109,29 +95,29 @@ struct ModernContentView: View {
                             camera: camera,
                             motionManager: motionManager,
                             orientationManager: orientationManager,
-                            showGrid: showGrid,
-                            gridType: gridType,
-                            showLevel: showLevel,
-                            focusPeakingEnabled: focusPeakingEnabled,
-                            focusPeakingColor: focusPeakingColor,
-                            focusPeakingIntensity: focusPeakingIntensity
+                            showGrid: settings.showGrid,
+                            gridType: settings.gridType,
+                            showLevel: settings.showLevel,
+                            focusPeakingEnabled: settings.focusPeakingEnabled,
+                            focusPeakingColor: settings.focusPeakingColor,
+                            focusPeakingIntensity: settings.focusPeakingIntensity
                         )
 
                         // Top bar
                         VStack {
                             ModernTopBarEnhanced(
                                 camera: camera,
-                                currentShootingMode: $currentShootingMode,
-                                selectedEVStep: selectedEVStep,
+                                currentShootingMode: $settings.currentShootingMode,
+                                selectedEVStep: settings.selectedEVStep,
                                 showProControls: $showProControls,
-                                flashMode: $flashMode,
-                                timerMode: $timerMode,
-                                isGridActive: showGrid,
-                                isLevelActive: showLevel,
+                                flashMode: $settings.flashMode,
+                                timerMode: $settings.timerMode,
+                                isGridActive: settings.showGrid,
+                                isLevelActive: settings.showLevel,
                                 onGridToggle: toggleGrid,
                                 onLevelToggle: toggleLevel
                             )
-                            .padding(.top, 60)
+                            .padding(.top, safeTop + 12)
                             Spacer()
                         }
 
@@ -142,22 +128,23 @@ struct ModernContentView: View {
                                 camera: camera,
                                 showProControls: $showProControls,
                                 showSettings: $showSettings,
-                                selectedEVStep: $selectedEVStep,
+                                selectedEVStep: $settings.selectedEVStep,
                                 currentEVCompensation: $currentEVCompensation,
                                 evCompensationLocked: $evCompensationLocked,
-                                focusPeakingEnabled: $focusPeakingEnabled,
-                                focusPeakingColor: $focusPeakingColor,
-                                focusPeakingIntensity: $focusPeakingIntensity,
-                                bracketShotCount: $bracketShotCount,
+                                focusPeakingEnabled: $settings.focusPeakingEnabled,
+                                focusPeakingColor: $settings.focusPeakingColor,
+                                focusPeakingIntensity: $settings.focusPeakingIntensity,
+                                bracketShotCount: $settings.bracketShotCount,
                                 selectedZoom: $selectedZoom,
-                                flashMode: $flashMode,
-                                timerMode: $timerMode,
-                                isGridActive: $showGrid,
-                                isLevelActive: $showLevel,
-                                currentShootingMode: $currentShootingMode,
+                                flashMode: $settings.flashMode,
+                                timerMode: $settings.timerMode,
+                                isGridActive: $settings.showGrid,
+                                isLevelActive: $settings.showLevel,
+                                currentShootingMode: $settings.currentShootingMode,
                                 onGridToggle: toggleGrid,
                                 onLevelToggle: toggleLevel
                             )
+                            .padding(.bottom, safeBottom + 12)
                         }
                     }
                 }
@@ -167,13 +154,13 @@ struct ModernContentView: View {
                     ModernProControls(
                         camera: camera,
                         showProControls: $showProControls,
-                        selectedEVStep: $selectedEVStep,
+                        selectedEVStep: $settings.selectedEVStep,
                         currentEVCompensation: $currentEVCompensation,
                         evCompensationLocked: $evCompensationLocked,
-                        focusPeakingEnabled: $focusPeakingEnabled,
-                        focusPeakingColor: $focusPeakingColor,
-                        focusPeakingIntensity: $focusPeakingIntensity,
-                        bracketShotCount: $bracketShotCount
+                        focusPeakingEnabled: $settings.focusPeakingEnabled,
+                        focusPeakingColor: $settings.focusPeakingColor,
+                        focusPeakingIntensity: $settings.focusPeakingIntensity,
+                        bracketShotCount: $settings.bracketShotCount
                     )
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
@@ -183,12 +170,12 @@ struct ModernContentView: View {
                     ModernSettingsPanel(
                         camera: camera,
                         showSettings: $showSettings,
-                        showGrid: $showGrid,
-                        gridType: $gridType,
-                        showLevel: $showLevel,
-                        focusPeakingEnabled: $focusPeakingEnabled,
-                        focusPeakingColor: $focusPeakingColor,
-                        focusPeakingIntensity: $focusPeakingIntensity
+                        showGrid: $settings.showGrid,
+                        gridType: $settings.gridType,
+                        showLevel: $settings.showLevel,
+                        focusPeakingEnabled: $settings.focusPeakingEnabled,
+                        focusPeakingColor: $settings.focusPeakingColor,
+                        focusPeakingIntensity: $settings.focusPeakingIntensity
                     )
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
@@ -201,15 +188,15 @@ struct ModernContentView: View {
                 if camera.isCapturing {
                     ModernCaptureProgress(
                         progress: camera.captureProgress,
-                        evStep: selectedEVStep,
-                        totalShots: bracketShotCount
+                        evStep: settings.selectedEVStep,
+                        totalShots: settings.bracketShotCount
                     )
                 }
 
                 // Mode change toast notification
                 if showModeChangeToast {
                     VStack {
-                        ModeChangeToast(mode: currentShootingMode)
+                        ModeChangeToast(mode: settings.currentShootingMode)
                             .padding(.top, 80)
                         Spacer()
                     }
@@ -234,7 +221,7 @@ struct ModernContentView: View {
                                 .fill(Color.orange.opacity(0.9))
                         )
                         .shadow(color: .black.opacity(0.3), radius: 4, x: 0, y: 2)
-                        .padding(.top, 120)
+                        .padding(.top, safeTop + 64)
                         Spacer()
                     }
                     .transition(.move(edge: .top).combined(with: .opacity))
@@ -243,7 +230,7 @@ struct ModernContentView: View {
             }
         }
         .ignoresSafeArea()
-        .onChange(of: currentShootingMode) { oldValue, newValue in
+        .onChange(of: settings.currentShootingMode) { oldValue, newValue in
             if oldValue != newValue {
                 showModeChangeToast = true
                 HapticManager.shared.gridTypeChanged()
@@ -261,7 +248,7 @@ struct ModernContentView: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: task)
             }
         }
-        .onChange(of: showLevel) { _, newValue in
+        .onChange(of: settings.showLevel) { _, newValue in
             motionManager.isLevelingActive = newValue
         }
         .onChange(of: selectedZoom) { _, newValue in
@@ -277,7 +264,7 @@ struct ModernContentView: View {
         }
         .onAppear {
             motionManager.start()
-            motionManager.isLevelingActive = showLevel
+            motionManager.isLevelingActive = settings.showLevel
         }
         .environmentObject(orientationManager)
         .onDisappear {
@@ -312,13 +299,13 @@ struct ModernContentView: View {
     }
     
     private func toggleGrid() {
-        showGrid.toggle()
+        settings.showGrid.toggle()
         HapticManager.shared.gridTypeChanged()
     }
-    
+
     private func toggleLevel() {
-        showLevel.toggle()
-        motionManager.isLevelingActive = showLevel
+        settings.showLevel.toggle()
+        motionManager.isLevelingActive = settings.showLevel
         HapticManager.shared.gridTypeChanged()
     }
 }
@@ -347,6 +334,7 @@ struct ModernCameraPreview: View {
                 showGrid: showGrid,
                 levelAngle: showLevel ? motionManager.levelAngleDegrees(for: orientationManager.currentOrientation) : 0,
                 showHistogram: false,
+                histogramData: camera.histogramProcessor.histogramData,
                 focusPeakingEnabled: focusPeakingEnabled,
                 focusPeakingColor: focusPeakingColor,
                 focusPeakingIntensity: focusPeakingIntensity
@@ -563,6 +551,7 @@ struct ModernToggleButton: View {
             }
         }
         .buttonStyle(.plain)
+        .accessibilityValue(isActive ? "On" : "Off")
     }
 }
 
@@ -613,6 +602,7 @@ struct ModernPhotoLibraryButton: View {
             }
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("Photo Library")
     }
 }
 
@@ -664,6 +654,8 @@ struct ModernShutterButton: View {
         .disabled(isCapturing)
         .scaleEffect(isCapturing ? 0.95 : 1.0)
         .animation(ModernDesignSystem.Animations.spring, value: isCapturing)
+        .accessibilityLabel("Capture")
+        .accessibilityValue(isCapturing ? "Capturing shot \(progress) of \(totalSteps)" : "Ready")
     }
 }
 
@@ -692,6 +684,8 @@ struct ModernSettingsButton: View {
             }
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("Settings")
+        .accessibilityValue(showSettings ? "Open" : "Closed")
     }
 }
 

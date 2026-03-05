@@ -16,6 +16,8 @@ private enum Constants {
     static let aeSettleMaxWait: TimeInterval = 2.0
     static let aeSettlePollInterval: TimeInterval = 0.02
     static let aeOffsetThreshold: Float = 0.10
+    static let bracketTimeoutSeconds: TimeInterval = 30.0
+    static let minimumStorageMB: Int64 = 500
 }
 
 enum CameraKind: CaseIterable, Identifiable {
@@ -65,6 +67,13 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
 
     @Published var teleUses12MP: Bool = false
 
+    // Manual control capabilities (updated when lens changes)
+    @Published var minISO: Float = 50
+    @Published var maxISO: Float = 3200
+    @Published var minShutterSpeed: Float = 0.00001
+    @Published var maxShutterSpeed: Float = 1.0
+    @Published var maxWBGain: Float = 4.0
+
     // Bracketing configuration
     private var plannedEVs: [Float] = []
 
@@ -89,9 +98,11 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
     private var maxPhotoDims: CMVideoDimensions?
 
     private let locationProvider = LocationProvider()
+    let histogramProcessor = HistogramProcessor()
     private var exposureUpdateTimer: Timer?
     private var notificationAuthorizationGranted = false
     private var cancellables = Set<AnyCancellable>()
+    private var bracketTimeoutTask: DispatchWorkItem?
 
     // Orientation management - weak reference to avoid retain cycle
     weak var orientationManager: OrientationManager? {
@@ -202,6 +213,7 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
                 if self.session.canAddOutput(self.photoOutput) {
                     self.session.addOutput(self.photoOutput)
                 }
+                self.histogramProcessor.attachToSession(self.session)
 
                 self.setInput(kind: initialKind)
                 self.discoverAvailableCameraKinds()
@@ -335,6 +347,7 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
         } catch {
             self.postError("Camera input error: \(error.localizedDescription)")
         }
+        self.updateDeviceCapabilities()
     }
 
     private func selectBestPhotoFormat() {
@@ -463,8 +476,125 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
         }
     }
 
+    // MARK: - Manual Camera Controls
+
+    /// Update published min/max capabilities from the current device's active format
+    private func updateDeviceCapabilities() {
+        guard let dev = self.device else { return }
+        let isoMin = dev.activeFormat.minISO
+        let isoMax = dev.activeFormat.maxISO
+        let durMin = Float(CMTimeGetSeconds(dev.activeFormat.minExposureDuration))
+        let durMax = Float(CMTimeGetSeconds(dev.activeFormat.maxExposureDuration))
+        let wbMax = dev.maxWhiteBalanceGain
+        main {
+            self.minISO = isoMin
+            self.maxISO = isoMax
+            self.minShutterSpeed = max(durMin, 0.00001)
+            self.maxShutterSpeed = durMax
+            self.maxWBGain = wbMax
+        }
+        Logger.camera("Device capabilities: ISO \(isoMin)-\(isoMax), shutter \(durMin)-\(durMax)s, WB gain max \(wbMax)")
+    }
+
+    func setManualISO(_ iso: Float) {
+        sessionQueue.async { [weak self] in
+            guard let self = self, let dev = self.device else { return }
+            let clamped = min(max(iso, dev.activeFormat.minISO), dev.activeFormat.maxISO)
+            do {
+                try dev.lockForConfiguration()
+                dev.setExposureModeCustom(duration: AVCaptureDevice.currentExposureDuration, iso: clamped)
+                dev.unlockForConfiguration()
+                Logger.camera("Set manual ISO: \(clamped)")
+            } catch {
+                Logger.camera("Failed to set ISO: \(error.localizedDescription)", level: .error)
+            }
+        }
+    }
+
+    func setManualShutterSpeed(_ duration: Float) {
+        sessionQueue.async { [weak self] in
+            guard let self = self, let dev = self.device else { return }
+            let minDur = CMTimeGetSeconds(dev.activeFormat.minExposureDuration)
+            let maxDur = CMTimeGetSeconds(dev.activeFormat.maxExposureDuration)
+            let clamped = min(max(Double(duration), minDur), maxDur)
+            let cmTime = CMTimeMakeWithSeconds(clamped, preferredTimescale: Constants.preferredTimescale)
+            do {
+                try dev.lockForConfiguration()
+                dev.setExposureModeCustom(duration: cmTime, iso: AVCaptureDevice.currentISO)
+                dev.unlockForConfiguration()
+                Logger.camera("Set manual shutter: \(clamped)s")
+            } catch {
+                Logger.camera("Failed to set shutter speed: \(error.localizedDescription)", level: .error)
+            }
+        }
+    }
+
+    func setManualWhiteBalance(temperature: Float) {
+        sessionQueue.async { [weak self] in
+            guard let self = self, let dev = self.device else { return }
+            let tempTint = AVCaptureDevice.WhiteBalanceTemperatureAndTintValues(
+                temperature: temperature, tint: 0
+            )
+            var gains = dev.deviceWhiteBalanceGains(for: tempTint)
+            gains = self.clampWBGains(gains, for: dev)
+            do {
+                try dev.lockForConfiguration()
+                dev.setWhiteBalanceModeLocked(with: gains, completionHandler: nil)
+                dev.unlockForConfiguration()
+                Logger.camera("Set manual WB: \(temperature)K")
+            } catch {
+                Logger.camera("Failed to set white balance: \(error.localizedDescription)", level: .error)
+            }
+        }
+    }
+
+    func setManualFocus(position: Float) {
+        sessionQueue.async { [weak self] in
+            guard let self = self, let dev = self.device else { return }
+            let clamped = min(max(position, 0), 1)
+            do {
+                try dev.lockForConfiguration()
+                dev.setFocusModeLocked(lensPosition: clamped, completionHandler: nil)
+                dev.unlockForConfiguration()
+                Logger.camera("Set manual focus: \(clamped)")
+            } catch {
+                Logger.camera("Failed to set focus: \(error.localizedDescription)", level: .error)
+            }
+        }
+    }
+
+    func resetToAutoExposure() {
+        sessionQueue.async { [weak self] in
+            guard let self = self, let dev = self.device else { return }
+            do {
+                try dev.lockForConfiguration()
+                if dev.isExposureModeSupported(.continuousAutoExposure) {
+                    dev.exposureMode = .continuousAutoExposure
+                }
+                if dev.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
+                    dev.whiteBalanceMode = .continuousAutoWhiteBalance
+                }
+                if dev.isFocusModeSupported(.continuousAutoFocus) {
+                    dev.focusMode = .continuousAutoFocus
+                }
+                dev.setExposureTargetBias(0, completionHandler: nil)
+                dev.unlockForConfiguration()
+                Logger.camera("Reset to auto exposure/WB/focus")
+            } catch {
+                Logger.camera("Failed to reset to auto: \(error.localizedDescription)", level: .error)
+            }
+        }
+    }
+
     func captureLockdownBracket(evStep: Float = Constants.defaultEVStep, shotCount: Int = 3) {
         guard !isCapturing && !sequenceInFlight else { return }
+
+        // Check available storage before starting
+        if !checkAvailableStorage() {
+            postError("Not enough storage space. Free up at least 500 MB to capture bracketed photos.")
+            return
+        }
+
         sessionQueue.async {
             guard let dev = self.device else {
                 self.postError("Camera device not available")
@@ -472,6 +602,7 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
             }
 
             self.sequenceInFlight = true
+            self.histogramProcessor.skipProcessing = true
             self.sequenceEVStep = evStep
             self.sequenceTimestamp = Int(Date().timeIntervalSince1970)
             self.rawPixelFormat = self.chooseRawPixelFormat()
@@ -515,6 +646,9 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
                     self.captureProgress = 0
                     HapticManager.shared.captureStarted()
                 }
+
+                // Schedule bracket timeout safety net
+                self.scheduleBracketTimeout()
 
                 if let rawFmt = self.rawPixelFormat {
                     self.captureBracketSequenceWithAPI(evOffsets: evOffsets, rawFormat: rawFmt)
@@ -644,7 +778,40 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
     }
 
 
+    // MARK: - Storage & Timeout Helpers
+
+    private func checkAvailableStorage() -> Bool {
+        do {
+            let attrs = try FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory())
+            if let freeSize = attrs[.systemFreeSize] as? Int64 {
+                let freeMB = freeSize / (1024 * 1024)
+                if freeMB < Constants.minimumStorageMB {
+                    Logger.camera("Low storage: \(freeMB) MB available")
+                    return false
+                }
+            }
+        } catch {
+            Logger.error("Could not check storage: \(error.localizedDescription)")
+        }
+        return true
+    }
+
+    private func scheduleBracketTimeout() {
+        bracketTimeoutTask?.cancel()
+        let task = DispatchWorkItem { [weak self] in
+            guard let self = self, self.sequenceInFlight else { return }
+            Logger.error("Bracket capture timed out after \(Constants.bracketTimeoutSeconds)s")
+            self.postError("Bracket capture timed out. Please try again.")
+            self.finishSequence()
+        }
+        bracketTimeoutTask = task
+        sessionQueue.asyncAfter(deadline: .now() + Constants.bracketTimeoutSeconds, execute: task)
+    }
+
     private func finishSequence() {
+        bracketTimeoutTask?.cancel()
+        bracketTimeoutTask = nil
+
         if let dev = self.device {
             do {
                 try dev.lockForConfiguration()
@@ -670,6 +837,7 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
         fetchBracketAssets()
 
         self.sequenceInFlight = false
+        self.histogramProcessor.skipProcessing = false
         self.rawPixelFormat = nil
         self.sequenceTimestamp = nil
 
