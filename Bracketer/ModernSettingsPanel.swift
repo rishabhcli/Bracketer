@@ -13,6 +13,9 @@ struct ModernSettingsPanel: View {
     @Binding var focusPeakingEnabled: Bool
     @Binding var focusPeakingColor: Color
     @Binding var focusPeakingIntensity: Float
+    @Binding var teleUses12MP: Bool
+    @Binding var flashMode: FlashMode
+    @Binding var timerMode: TimerMode
 
     private let focusPeakingColors: [Color] = [.red, .blue, .yellow, .green, .orange, .purple, .white]
     @State private var selectedCategory: SettingsCategory = .viewfinder
@@ -156,8 +159,11 @@ struct ModernSettingsPanel: View {
                                         )
                                     case .capture:
                                         ModernCameraSettings(
-                                            teleUses12MP: $camera.teleUses12MP,
-                                            selectedCamera: camera.selectedCamera
+                                            camera: camera,
+                                            teleUses12MP: $teleUses12MP,
+                                            selectedCamera: camera.selectedCamera,
+                                            flashMode: flashMode,
+                                            timerMode: timerMode
                                         )
                                     case .about:
                                         ModernAboutSection()
@@ -269,8 +275,46 @@ struct ModernFocusSettings: View {
 
 // MARK: - Modern Camera Settings
 struct ModernCameraSettings: View {
+    @ObservedObject var camera: CameraController
     @Binding var teleUses12MP: Bool
     let selectedCamera: CameraKind
+    let flashMode: FlashMode
+    let timerMode: TimerMode
+
+    private var captureConfiguration: EffectiveCaptureConfiguration {
+        camera.effectiveCaptureConfiguration(flashMode: flashMode, timerMode: timerMode)
+    }
+
+    private var captureBadges: [ModernSettingBadgeData] {
+        [
+            ModernSettingBadgeData(
+                icon: "photo.on.rectangle",
+                title: "Photo Format",
+                value: captureConfiguration.formatDisplayName,
+                tint: ModernDesignSystem.Colors.cameraControlActive
+            ),
+            ModernSettingBadgeData(
+                icon: "bolt.fill",
+                title: "Flash",
+                value: captureConfiguration.flashDisplayName,
+                tint: captureConfiguration.isFlashAvailable
+                    ? (flashMode == .off ? .gray : .yellow)
+                    : .gray
+            ),
+            ModernSettingBadgeData(
+                icon: "timer",
+                title: "Timer",
+                value: captureConfiguration.timerDisplayName,
+                tint: timerMode == .off ? .gray : .orange
+            ),
+            ModernSettingBadgeData(
+                icon: "location.fill",
+                title: "Location",
+                value: captureConfiguration.locationDisplayName,
+                tint: captureConfiguration.locationState == .on ? .orange : .gray
+            )
+        ]
+    }
 
     var body: some View {
         ModernSettingsCard(
@@ -278,20 +322,7 @@ struct ModernCameraSettings: View {
             subtitle: "Formats & hardware",
             icon: "camera.aperture"
         ) {
-            ModernSettingBadgeGrid(badges: [
-                ModernSettingBadgeData(
-                    icon: "photo.on.rectangle",
-                    title: "Photo Format",
-                    value: "ProRAW",
-                    tint: ModernDesignSystem.Colors.cameraControlActive
-                ),
-                ModernSettingBadgeData(
-                    icon: "location.fill",
-                    title: "Location",
-                    value: "On",
-                    tint: .orange
-                )
-            ])
+            ModernSettingBadgeGrid(badges: captureBadges)
 
             Divider()
                 .background(Color.white.opacity(0.08))
@@ -326,7 +357,18 @@ struct ModernCameraSettings: View {
 
 // MARK: - Modern About Section
 struct ModernAboutSection: View {
-    @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = true
+    @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
+
+    private var versionText: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unknown"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+
+        guard let build, build != version else {
+            return version
+        }
+
+        return "\(version) (\(build))"
+    }
 
     var body: some View {
         ModernSettingsCard(
@@ -337,7 +379,7 @@ struct ModernAboutSection: View {
             ModernSettingRow(
                 icon: "app.badge",
                 title: "Version",
-                value: "1.0.0",
+                value: versionText,
                 action: {}
             )
             ModernSettingRow(

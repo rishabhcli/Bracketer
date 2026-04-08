@@ -156,9 +156,10 @@ enum CameraZoomLevel: Float, CaseIterable, Hashable {
 @available(iOS 26.0, *)
 struct FlashModeControl: View {
     @Binding var flashMode: FlashMode
+    var isAvailable: Bool = true
 
     var body: some View {
-        FlashModeMenu(flashMode: $flashMode, style: .modern)
+        FlashModeMenu(flashMode: $flashMode, isAvailable: isAvailable, style: .modern)
     }
 }
 
@@ -264,6 +265,7 @@ enum ControlButtonStyle {
 
 struct FlashModeMenu: View {
     @Binding var flashMode: FlashMode
+    let isAvailable: Bool
     let style: ControlButtonStyle
 
     var body: some View {
@@ -278,25 +280,46 @@ struct FlashModeMenu: View {
                 }
             }
         } label: {
-            FlashModeMenuLabel(flashMode: flashMode, style: style)
+            FlashModeMenuLabel(
+                flashMode: flashMode,
+                isAvailable: isAvailable,
+                style: style
+            )
         }
         .accessibilityLabel("Flash Mode")
-        .accessibilityValue(flashMode.displayName)
-        .accessibilityHint("Double-tap to choose flash setting")
+        .accessibilityValue(isAvailable ? flashMode.displayName : "Unavailable")
+        .accessibilityHint(
+            isAvailable
+            ? "Double-tap to choose flash setting"
+            : "Flash is unavailable on the active lens"
+        )
+        .disabled(!isAvailable)
     }
 }
 
 struct FlashModeMenuLabel: View {
     let flashMode: FlashMode
+    let isAvailable: Bool
     let style: ControlButtonStyle
 
     var body: some View {
-        ControlCircleLabel(style: style, tint: flashMode.tintColor) {
-            let iconColor: Color = style == .legacy ? (flashMode == .off ? .white : .yellow) : .white
-            Image(systemName: flashMode.iconName)
+        ControlCircleLabel(
+            style: style,
+            tint: isAvailable ? flashMode.tintColor : .gray.opacity(0.25)
+        ) {
+            Image(systemName: isAvailable ? flashMode.iconName : "bolt.slash.circle.fill")
                 .font(.system(size: 18, weight: .medium))
                 .foregroundColor(iconColor)
+                .opacity(isAvailable ? 1.0 : 0.9)
         }
+    }
+
+    private var iconColor: Color {
+        guard isAvailable else {
+            return .gray
+        }
+
+        return style == .legacy ? (flashMode == .off ? .white : .yellow) : .white
     }
 }
 
@@ -449,6 +472,9 @@ struct EnhancedShutterButton: View {
         }
         .buttonStyle(ShutterButtonStyle(isPressed: $isPressed))
         .disabled(isCapturing)
+        .accessibilityLabel("Capture")
+        .accessibilityValue(isCapturing ? "Capturing" : "Ready")
+        .accessibilityIdentifier("camera.shutterButton")
     }
 }
 

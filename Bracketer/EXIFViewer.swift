@@ -10,8 +10,8 @@ struct EXIFViewer: View {
     let asset: PHAsset
     let metadata: [String: Any]
     let image: UIImage?
+    let onDismiss: () -> Void
     @State private var region = MKCoordinateRegion()
-    @State private var showFullScreen = false
     @State private var histogramData: HistogramData?
     @State private var showDepthMapViewer = false
 
@@ -54,7 +54,7 @@ struct EXIFViewer: View {
                 .foregroundColor(.white)
             Spacer()
             Button {
-                showFullScreen = false
+                onDismiss()
             } label: {
                 Image(systemName: "xmark.circle.fill")
                     .font(.system(size: 20, weight: .semibold))
@@ -66,6 +66,7 @@ struct EXIFViewer: View {
                     )
             }
             .buttonStyle(.plain)
+            .accessibilityIdentifier("viewer.exifCloseButton")
         }
     }
     

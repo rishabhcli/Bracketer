@@ -60,7 +60,13 @@ struct ContextualBottomControls: View {
                     isCapturing: camera.isCapturing,
                     progress: Double(camera.captureProgress) / Double(max(1, bracketShotCount))
                 ) {
-                    camera.captureLockdownBracket(evStep: selectedEVStep, shotCount: bracketShotCount)
+                    camera.captureLockdownBracket(
+                        evStep: selectedEVStep,
+                        shotCount: bracketShotCount,
+                        flashMode: flashMode,
+                        timerMode: timerMode,
+                        exposureCompensation: currentEVCompensation
+                    )
                 }
 
                 ModernSettingsButton(showSettings: $showSettings)
@@ -93,7 +99,7 @@ struct ContextualBottomControls: View {
     // AUTO mode: Essential controls only
     private var autoModeControls: some View {
         HStack(spacing: 20) {
-            FlashModeControl(flashMode: $flashMode)
+            FlashModeControl(flashMode: $flashMode, isAvailable: camera.isFlashAvailable)
             TimerModeControl(timerMode: $timerMode)
 
             Spacer()

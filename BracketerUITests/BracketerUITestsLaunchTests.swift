@@ -20,6 +20,10 @@ final class BracketerUITestsLaunchTests: XCTestCase {
     @MainActor
     func testLaunch() throws {
         let app = XCUIApplication()
+        app.launchArguments += [
+            "-ui-testing-skip-onboarding",
+            "-ui-testing-disable-camera-startup",
+        ]
         app.launch()
 
         // Insert steps here to perform after app launch but before taking a screenshot,

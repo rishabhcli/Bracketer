@@ -8,6 +8,8 @@ import SwiftUI
 struct BracketerApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
+    private let shouldSkipOnboardingForUITests = ProcessInfo.processInfo.arguments.contains("-ui-testing-skip-onboarding")
+
     init() {
         // Support all orientations - camera preview will auto-rotate
         AppDelegate.orientationLock = .all
@@ -17,7 +19,7 @@ struct BracketerApp: App {
 
     var body: some Scene {
         WindowGroup {
-            if hasCompletedOnboarding {
+            if hasCompletedOnboarding || shouldSkipOnboardingForUITests {
                 ModernContentView()
                     .onAppear {
                         // Support all orientations for camera

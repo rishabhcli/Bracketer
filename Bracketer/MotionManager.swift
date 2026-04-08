@@ -14,6 +14,7 @@ final class MotionLevelManager: NSObject, ObservableObject {
     // Level calculation properties
     private var referenceAttitude: CMAttitude?
     private let levelThreshold: Double = 1.0 // degrees
+    private var isRunning = false
     
     override init() {
         super.init()
@@ -23,8 +24,9 @@ final class MotionLevelManager: NSObject, ObservableObject {
     
     /// Start motion updates for camera orientation and leveling
     func start() {
+        guard !isRunning else { return }
         guard motionManager.isDeviceMotionAvailable else {
-            print("Device motion not available")
+            Logger.motion("Device motion not available", level: .warning)
             return
         }
         
@@ -38,7 +40,7 @@ final class MotionLevelManager: NSObject, ObservableObject {
         ) { [weak self] motion, error in
             guard let motion = motion, error == nil else {
                 if let error = error {
-                    print("Motion update error: \(error)")
+                    Logger.motion("Motion update error: \(error.localizedDescription)", level: .error)
                 }
                 return
             }
@@ -47,11 +49,17 @@ final class MotionLevelManager: NSObject, ObservableObject {
                 self?.currentAttitude = motion.attitude
             }
         }
+
+        isRunning = true
+        Logger.motion("Motion updates started")
     }
     
     /// Stop motion updates
     func stop() {
+        guard isRunning else { return }
         motionManager.stopDeviceMotionUpdates()
+        isRunning = false
+        Logger.motion("Motion updates stopped")
     }
     
     /// Calculate level angle in degrees for current device orientation

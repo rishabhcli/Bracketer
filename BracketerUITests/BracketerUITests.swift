@@ -23,19 +23,49 @@ final class BracketerUITests: XCTestCase {
     }
 
     @MainActor
-    func testExample() throws {
-        // UI tests must launch the application that they test.
+    func testCameraScreenLaunchesWithStableControls() throws {
         let app = XCUIApplication()
+        app.launchArguments += [
+            "-ui-testing-skip-onboarding",
+            "-ui-testing-disable-camera-startup",
+        ]
         app.launch()
 
-        // Use XCTAssert and related functions to verify your tests produce the correct results.
+        XCTAssertTrue(app.buttons["camera.photoLibraryButton"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["camera.shutterButton"].exists)
+        XCTAssertTrue(app.buttons["camera.settingsButton"].exists)
+    }
+
+    @MainActor
+    func testCaptureSettingsShowEffectiveConfigurationWhenCameraStartupIsDisabled() throws {
+        let app = XCUIApplication()
+        app.launchArguments += [
+            "-ui-testing-skip-onboarding",
+            "-ui-testing-disable-camera-startup",
+        ]
+        app.launch()
+
+        let settingsButton = app.buttons["camera.settingsButton"]
+        XCTAssertTrue(settingsButton.waitForExistence(timeout: 5))
+        settingsButton.tap()
+
+        XCTAssertTrue(app.staticTexts["Settings"].waitForExistence(timeout: 5))
+        app.buttons["Capture"].tap()
+        XCTAssertTrue(app.staticTexts["HEIF/JPEG"].exists)
+        XCTAssertTrue(app.staticTexts["Unavailable"].exists)
+        XCTAssertTrue(app.staticTexts["Pending"].exists)
     }
 
     @MainActor
     func testLaunchPerformance() throws {
         // This measures how long it takes to launch your application.
         measure(metrics: [XCTApplicationLaunchMetric()]) {
-            XCUIApplication().launch()
+            let app = XCUIApplication()
+            app.launchArguments += [
+                "-ui-testing-skip-onboarding",
+                "-ui-testing-disable-camera-startup",
+            ]
+            app.launch()
         }
     }
 }

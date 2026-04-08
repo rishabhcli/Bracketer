@@ -19,6 +19,7 @@ final class SettingsStore: ObservableObject {
         static let shootingMode = "settings.shootingMode"
         static let flashMode = "settings.flashMode"
         static let timerMode = "settings.timerMode"
+        static let teleUses12MP = "settings.teleUses12MP"
     }
 
     // MARK: - Viewfinder
@@ -73,6 +74,10 @@ final class SettingsStore: ObservableObject {
         didSet { Self.defaults.set(timerModeKey(timerMode), forKey: Keys.timerMode) }
     }
 
+    @Published var teleUses12MP: Bool {
+        didSet { Self.defaults.set(teleUses12MP, forKey: Keys.teleUses12MP) }
+    }
+
     // MARK: - Init (load persisted values)
 
     init() {
@@ -92,6 +97,7 @@ final class SettingsStore: ObservableObject {
         self.currentShootingMode = ShootingMode(rawValue: d.string(forKey: Keys.shootingMode) ?? "") ?? .auto
         self.flashMode = Self.flashModeFromKey(d.string(forKey: Keys.flashMode) ?? "off")
         self.timerMode = Self.timerModeFromKey(d.string(forKey: Keys.timerMode) ?? "off")
+        self.teleUses12MP = d.object(forKey: Keys.teleUses12MP) as? Bool ?? false
     }
 
     // MARK: - Presets

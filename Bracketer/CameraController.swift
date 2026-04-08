@@ -51,6 +51,117 @@ struct CamError: Identifiable {
     }
 }
 
+enum BracketSequencePlanner {
+    static func evOffsets(evStep: Float, shotCount: Int, centerBias: Float = 0) -> [Float] {
+        let symmetricOffsets: [Float]
+        switch shotCount {
+        case 3:
+            symmetricOffsets = [-evStep, 0, +evStep]
+        case 5:
+            symmetricOffsets = [-2 * evStep, -evStep, 0, +evStep, +2 * evStep]
+        case 7:
+            symmetricOffsets = [-3 * evStep, -2 * evStep, -evStep, 0, +evStep, +2 * evStep, +3 * evStep]
+        default:
+            symmetricOffsets = [-evStep, 0, +evStep]
+        }
+
+        guard centerBias != 0 else {
+            return symmetricOffsets
+        }
+
+        return symmetricOffsets.map { $0 + centerBias }
+    }
+}
+
+struct EffectiveCaptureConfiguration: Equatable {
+    enum LocationState: Equatable {
+        case on
+        case pending
+        case off
+        case unknown
+
+        init(authorizationStatus: CLAuthorizationStatus) {
+            switch authorizationStatus {
+            case .authorizedAlways, .authorizedWhenInUse:
+                self = .on
+            case .notDetermined:
+                self = .pending
+            case .denied, .restricted:
+                self = .off
+            @unknown default:
+                self = .unknown
+            }
+        }
+
+        var displayName: String {
+            switch self {
+            case .on:
+                return "On"
+            case .pending:
+                return "Pending"
+            case .off:
+                return "Off"
+            case .unknown:
+                return "Unknown"
+            }
+        }
+    }
+
+    let isRawEnabled: Bool
+    let flashMode: FlashMode
+    let isFlashAvailable: Bool
+    let timerMode: TimerMode
+    let locationState: LocationState
+
+    static func resolve(
+        isRawEnabled: Bool,
+        flashMode: FlashMode,
+        isFlashAvailable: Bool,
+        timerMode: TimerMode,
+        locationAuthorizationStatus: CLAuthorizationStatus
+    ) -> EffectiveCaptureConfiguration {
+        EffectiveCaptureConfiguration(
+            isRawEnabled: isRawEnabled,
+            flashMode: flashMode,
+            isFlashAvailable: isFlashAvailable,
+            timerMode: timerMode,
+            locationState: LocationState(authorizationStatus: locationAuthorizationStatus)
+        )
+    }
+
+    var formatDisplayName: String {
+        isRawEnabled ? "ProRAW" : "HEIF/JPEG"
+    }
+
+    var formatBadgeLabel: String {
+        isRawEnabled ? "RAW" : "HEIF"
+    }
+
+    var flashDisplayName: String {
+        isFlashAvailable ? flashMode.displayName : "Unavailable"
+    }
+
+    var flashBadgeLabel: String {
+        isFlashAvailable ? flashMode.displayName : "N/A"
+    }
+
+    var flashIconName: String {
+        isFlashAvailable ? flashMode.iconName : "bolt.slash.circle.fill"
+    }
+
+    var timerDisplayName: String {
+        timerMode.displayName
+    }
+
+    var timerBadgeLabel: String? {
+        timerMode == .off ? nil : timerMode.displayName
+    }
+
+    var locationDisplayName: String {
+        locationState.displayName
+    }
+}
+
 final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
     @Published var lastError: CamError?
     @Published var isProRAWEnabled: Bool = false
@@ -59,6 +170,7 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
     @Published var isInitializing: Bool = false
     @Published var isCapturing: Bool = false
     @Published var captureProgress: Int = 0
+    @Published var countdownSecondsRemaining: Int?
     @Published var currentISO: Float = 100.0
     @Published var currentShutterSpeedText: String = "1/60"
     @Published var lastBracketAssets: [PHAsset] = []
@@ -103,6 +215,9 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
     private var notificationAuthorizationGranted = false
     private var cancellables = Set<AnyCancellable>()
     private var bracketTimeoutTask: DispatchWorkItem?
+    private var countdownTask: Task<Void, Never>?
+    private var hasResolvedPermissions = false
+    private var hasConfiguredSession = false
 
     // Orientation management - weak reference to avoid retain cycle
     weak var orientationManager: OrientationManager? {
@@ -115,8 +230,26 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
         super.init()
     }
 
+    var isFlashAvailable: Bool {
+        device?.hasFlash ?? false
+    }
+
+    func effectiveCaptureConfiguration(
+        flashMode: FlashMode,
+        timerMode: TimerMode
+    ) -> EffectiveCaptureConfiguration {
+        EffectiveCaptureConfiguration.resolve(
+            isRawEnabled: isProRAWEnabled,
+            flashMode: flashMode,
+            isFlashAvailable: isFlashAvailable,
+            timerMode: timerMode,
+            locationAuthorizationStatus: locationProvider.authorizationStatus
+        )
+    }
+
     deinit {
         exposureUpdateTimer?.invalidate()
+        countdownTask?.cancel()
         cancellables.removeAll()
     }
 
@@ -151,14 +284,21 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
             layer.videoGravity = .resizeAspectFill
             // Preview layer is not rotated - stays fixed to device screen
             // Only photo output connection is rotated via OrientationManager
-            self.applyRotationAsync(to: self.photoOutput.connection(with: .video))
+            self.applyRotationAsync()
         }
     }
 
     func start() async {
+        if isInitializing {
+            return
+        }
+
         main { self.isInitializing = true }
         do {
-            try await requestPermissions()
+            if !hasResolvedPermissions {
+                try await requestPermissions()
+                hasResolvedPermissions = true
+            }
         } catch {
             main {
                 self.lastError = CamError(message: "Permissions: \(error.localizedDescription)", isRecoverable: false)
@@ -167,18 +307,70 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
             return
         }
 
-        await configureSession(initialKind: selectedCamera)
-        sessionQueue.async { [weak self] in
-            self?.session.startRunning()
+        if !hasConfiguredSession {
+            await configureSession(initialKind: selectedCamera)
+            hasConfiguredSession = true
         }
+
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            self.histogramProcessor.skipProcessing = false
+            if !self.session.isRunning {
+                self.session.startRunning()
+                Logger.cameraSession("started")
+            }
+        }
+
         locationProvider.start()
 
         main {
             self.isInitializing = false
-            // Invalidate existing timer before creating a new one to prevent leaks
+            if self.exposureUpdateTimer == nil {
+                self.exposureUpdateTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+                    self?.updateExposureUI()
+                }
+            }
+        }
+    }
+
+    func stop() {
+        countdownTask?.cancel()
+        countdownTask = nil
+
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+
+            self.histogramProcessor.skipProcessing = true
+            self.locationProvider.stop()
+
+            if self.session.isRunning {
+                self.session.stopRunning()
+                Logger.cameraSession("stopped")
+            }
+        }
+
+        main {
+            self.isInitializing = false
+            self.countdownSecondsRemaining = nil
             self.exposureUpdateTimer?.invalidate()
-            self.exposureUpdateTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-                self?.updateExposureUI()
+            self.exposureUpdateTimer = nil
+        }
+    }
+
+    func setExposureCompensation(_ bias: Float) {
+        sessionQueue.async { [weak self] in
+            guard let self, let dev = self.device else { return }
+
+            let supportedRange = -dev.maxExposureTargetBias...dev.maxExposureTargetBias
+            let clampedBias = min(max(bias, supportedRange.lowerBound), supportedRange.upperBound)
+
+            do {
+                try dev.lockForConfiguration()
+                dev.setExposureTargetBias(clampedBias, completionHandler: nil)
+                dev.unlockForConfiguration()
+                Logger.camera("Set exposure compensation bias: \(clampedBias)")
+            } catch {
+                Logger.camera("Failed to set exposure compensation: \(error.localizedDescription)", level: .error)
             }
         }
     }
@@ -227,7 +419,7 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
         }
         sessionQueue.async {
             // Apply rotation to photo output (not preview layer)
-            self.applyRotationAsync(to: self.photoOutput.connection(with: .video))
+            self.applyRotationAsync()
             self.applyZoomForSelectedCamera(kind: initialKind)
         }
     }
@@ -296,7 +488,7 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
             self.session.commitConfiguration()
 
             // Apply rotation to photo output after camera switch
-            self.applyRotationAsync(to: self.photoOutput.connection(with: .video))
+            self.applyRotationAsync()
             self.applyZoomForSelectedCamera(kind: kind)
             self.main { self.selectedCamera = kind }
         }
@@ -429,12 +621,12 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
 
     /// Apply rotation by fetching orientation from main actor and dispatching to sessionQueue
     /// Must be called when you need fresh orientation data
-    private func applyRotationAsync(to connection: AVCaptureConnection?) {
+    private func applyRotationAsync() {
         Task { @MainActor in
             guard let orientationManager = self.orientationManager else { return }
             let angle = orientationManager.videoRotationAngle(for: orientationManager.effectiveOrientation)
             self.sessionQueue.async {
-                self.applyRotationWithAngle(angle, to: connection)
+                self.applyRotationWithAngle(angle, to: self.photoOutput.connection(with: .video))
             }
         }
     }
@@ -586,14 +778,107 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
         }
     }
 
-    func captureLockdownBracket(evStep: Float = Constants.defaultEVStep, shotCount: Int = 3) {
-        guard !isCapturing && !sequenceInFlight else { return }
+    func captureLockdownBracket(
+        evStep: Float = Constants.defaultEVStep,
+        shotCount: Int = 3,
+        flashMode: FlashMode = .off,
+        timerMode: TimerMode = .off,
+        exposureCompensation: Float = 0
+    ) {
+        guard !isCapturing && !sequenceInFlight && countdownTask == nil else { return }
 
         // Check available storage before starting
         if !checkAvailableStorage() {
             postError("Not enough storage space. Free up at least 500 MB to capture bracketed photos.")
             return
         }
+
+        if timerMode == .off {
+            beginBracketCapture(
+                evStep: evStep,
+                shotCount: shotCount,
+                flashMode: flashMode,
+                exposureCompensation: exposureCompensation
+            )
+        } else {
+            startCountdownAndCapture(
+                evStep: evStep,
+                shotCount: shotCount,
+                flashMode: flashMode,
+                timerMode: timerMode,
+                exposureCompensation: exposureCompensation
+            )
+        }
+    }
+
+    private func startCountdownAndCapture(
+        evStep: Float,
+        shotCount: Int,
+        flashMode: FlashMode,
+        timerMode: TimerMode,
+        exposureCompensation: Float
+    ) {
+        let countdownSeconds = timerMode.seconds
+        guard countdownSeconds > 0 else {
+            beginBracketCapture(
+                evStep: evStep,
+                shotCount: shotCount,
+                flashMode: flashMode,
+                exposureCompensation: exposureCompensation
+            )
+            return
+        }
+
+        main {
+            self.countdownSecondsRemaining = countdownSeconds
+        }
+
+        countdownTask = Task { [weak self] in
+            guard let self else { return }
+
+            defer {
+                self.main {
+                    self.countdownSecondsRemaining = nil
+                }
+                self.countdownTask = nil
+            }
+
+            for remaining in stride(from: countdownSeconds, through: 1, by: -1) {
+                if Task.isCancelled {
+                    return
+                }
+
+                self.main {
+                    self.countdownSecondsRemaining = remaining
+                }
+
+                do {
+                    try await Task.sleep(nanoseconds: 1_000_000_000)
+                } catch {
+                    return
+                }
+            }
+
+            if Task.isCancelled {
+                return
+            }
+
+            self.beginBracketCapture(
+                evStep: evStep,
+                shotCount: shotCount,
+                flashMode: flashMode,
+                exposureCompensation: exposureCompensation
+            )
+        }
+    }
+
+    private func beginBracketCapture(
+        evStep: Float,
+        shotCount: Int,
+        flashMode: FlashMode,
+        exposureCompensation: Float
+    ) {
+        let resolvedFlashMode = resolveFlashMode(flashMode)
 
         sessionQueue.async {
             guard let dev = self.device else {
@@ -608,12 +893,16 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
             self.rawPixelFormat = self.chooseRawPixelFormat()
 
             // Lock orientation to ensure all bracketed photos have the same orientation
-            self.main {
-                self.orientationManager?.lockOrientation()
+            Task { @MainActor [weak self] in
+                self?.orientationManager?.lockOrientation()
             }
 
             // Build bracket plan based on parameters
-            let evOffsets = self.buildBracketEVOffsets(evStep: evStep, shotCount: shotCount)
+            let evOffsets = self.buildBracketEVOffsets(
+                evStep: evStep,
+                shotCount: shotCount,
+                centerBias: exposureCompensation
+            )
             self.plannedEVs = evOffsets
             Logger.camera("Starting bracket capture with \(shotCount) shots at ±\(evStep) EV: \(evOffsets)")
 
@@ -629,7 +918,9 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
                 if dev.isFocusModeSupported(.continuousAutoFocus) {
                     dev.focusMode = .continuousAutoFocus
                 }
-                dev.setExposureTargetBias(0, completionHandler: nil)
+                let supportedRange = -dev.maxExposureTargetBias...dev.maxExposureTargetBias
+                let clampedBias = min(max(exposureCompensation, supportedRange.lowerBound), supportedRange.upperBound)
+                dev.setExposureTargetBias(clampedBias, completionHandler: nil)
                 dev.unlockForConfiguration()
             } catch {
                 self.postError("Auto baseline failed: \(error.localizedDescription)")
@@ -640,7 +931,7 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
             // Wait for AE to settle before capturing bracket
             self.settleAutoExposure { [weak self] in
                 guard let self = self else { return }
-                self.applyRotationAsync(to: self.photoOutput.connection(with: .video))
+                self.applyRotationAsync()
                 self.main {
                     self.isCapturing = true
                     self.captureProgress = 0
@@ -651,17 +942,28 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
                 self.scheduleBracketTimeout()
 
                 if let rawFmt = self.rawPixelFormat {
-                    self.captureBracketSequenceWithAPI(evOffsets: evOffsets, rawFormat: rawFmt)
+                    self.captureBracketSequenceWithAPI(
+                        evOffsets: evOffsets,
+                        rawFormat: rawFmt,
+                        flashMode: resolvedFlashMode
+                    )
                 } else {
                     Logger.camera("RAW unavailable for \(self.selectedCamera.label); falling back to processed HEIF bracket.")
-                    self.captureBracketSequenceProcessed(evOffsets: evOffsets)
+                    self.captureBracketSequenceProcessed(
+                        evOffsets: evOffsets,
+                        flashMode: resolvedFlashMode
+                    )
                 }
             }
         }
     }
 
     // MARK: - Apple Bracketing API Implementation
-    private func captureBracketSequenceWithAPI(evOffsets: [Float], rawFormat: OSType) {
+    private func captureBracketSequenceWithAPI(
+        evOffsets: [Float],
+        rawFormat: OSType,
+        flashMode: AVCaptureDevice.FlashMode
+    ) {
         // Create bracketed still image settings using Apple's API
         let bracketSettings: [AVCaptureBracketedStillImageSettings] = evOffsets.map { evOffset in
             AVCaptureAutoExposureBracketedStillImageSettings.autoExposureSettings(exposureTargetBias: evOffset)
@@ -678,7 +980,7 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
         if let dims = self.maxPhotoDims {
             photoSettings.maxPhotoDimensions = dims
         }
-        photoSettings.flashMode = AVCaptureDevice.FlashMode.off
+        photoSettings.flashMode = flashMode
 
         // Store expected shot count for progress tracking
         self.sequenceStep = 0
@@ -689,7 +991,10 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
         self.photoOutput.capturePhoto(with: photoSettings, delegate: self)
     }
 
-    private func captureBracketSequenceProcessed(evOffsets: [Float]) {
+    private func captureBracketSequenceProcessed(
+        evOffsets: [Float],
+        flashMode: AVCaptureDevice.FlashMode
+    ) {
         let bracketSettings: [AVCaptureBracketedStillImageSettings] = evOffsets.map {
             AVCaptureAutoExposureBracketedStillImageSettings.autoExposureSettings(exposureTargetBias: $0)
         }
@@ -703,7 +1008,7 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
         if let dims = self.maxPhotoDims {
             photoSettings.maxPhotoDimensions = dims
         }
-        photoSettings.flashMode = AVCaptureDevice.FlashMode.off
+        photoSettings.flashMode = flashMode
         self.sequenceStep = 0
         Logger.camera("Capturing processed bracket (\(preferredCodec.rawValue)) with \(bracketSettings.count) exposures")
         self.photoOutput.capturePhoto(with: photoSettings, delegate: self)
@@ -729,17 +1034,22 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
         }
     }
 
-    private func buildBracketEVOffsets(evStep: Float, shotCount: Int) -> [Float] {
-        switch shotCount {
-        case 3:
-            return [-evStep, 0, +evStep]
-        case 5:
-            return [-2*evStep, -evStep, 0, +evStep, +2*evStep]
-        case 7:
-            return [-3*evStep, -2*evStep, -evStep, 0, +evStep, +2*evStep, +3*evStep]
-        default:
-            // Default to 3-shot bracket
-            return [-evStep, 0, +evStep]
+    private func buildBracketEVOffsets(evStep: Float, shotCount: Int, centerBias: Float = 0) -> [Float] {
+        BracketSequencePlanner.evOffsets(evStep: evStep, shotCount: shotCount, centerBias: centerBias)
+    }
+
+    private func resolveFlashMode(_ selectedFlashMode: FlashMode) -> AVCaptureDevice.FlashMode {
+        guard let device, device.hasFlash else {
+            return .off
+        }
+
+        switch selectedFlashMode {
+        case .auto:
+            return .auto
+        case .on:
+            return .on
+        case .off:
+            return .off
         }
     }
 
@@ -987,8 +1297,9 @@ extension CameraController: AVCapturePhotoCaptureDelegate {
             }
         } else {
             // Handle processed photos (HEIF/JPEG) when RAW is not available
+            let processedFileExtension = self.photoOutput.availablePhotoCodecTypes.contains(.hevc) ? "heic" : "jpg"
             PhotoSaver.saveProcessed(data: data,
-                                    suggestedFilename: "Bracket-\(timestamp).heic",
+                                    suggestedFilename: "Bracket-\(timestamp).\(processedFileExtension)",
                                     location: loc,
                                     bracketLabel: bracketLabel) { [weak self] assetId in
                 self?.handlePhotoSaved(assetId: assetId, bracketLabel: bracketLabel, currentStep: currentStep, totalShots: totalShots)
@@ -1051,8 +1362,22 @@ enum PhotoSaver {
     /// Save processed photo data (HEIF/JPEG format) to Photo Library
     static func saveProcessed(data: Data, suggestedFilename: String, location: CLLocation?, bracketLabel: String? = nil, completion: @escaping (String?) -> Void) {
         let timestamp = extractTimestamp(from: suggestedFilename)
-        let filename = bracketLabel.map { "Bracket-\($0)-\(timestamp).heic" } ?? "Bracket-\(timestamp).heic"
+        let fileExtension = processedFileExtension(for: suggestedFilename)
+        let filename = bracketLabel.map { "Bracket-\($0)-\(timestamp).\(fileExtension)" } ?? "Bracket-\(timestamp).\(fileExtension)"
         savePhoto(data: data, filename: filename, location: location, completion: completion)
+    }
+
+    static func processedFileExtension(for suggestedFilename: String) -> String {
+        let fileExtension = URL(fileURLWithPath: suggestedFilename).pathExtension.lowercased()
+
+        switch fileExtension {
+        case "jpg", "jpeg":
+            return "jpg"
+        case "heif", "heic":
+            return "heic"
+        default:
+            return "heic"
+        }
     }
 
     /// Extract timestamp from filename or generate new one
@@ -1092,6 +1417,10 @@ enum PhotoSaver {
 final class LocationProvider: NSObject, CLLocationManagerDelegate {
     private let manager = CLLocationManager()
     private(set) var latestLocation: CLLocation?
+
+    var authorizationStatus: CLAuthorizationStatus {
+        manager.authorizationStatus
+    }
 
     override init() {
         super.init()

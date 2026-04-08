@@ -7,8 +7,8 @@ import MapKit
 /// High-performance image viewer for bracketed photo sequences
 /// Provides RAW/processed toggle, navigation, and professional review tools
 struct ImageViewer: View {
-    let bracketAssets: [PHAsset]
     let onDismiss: () -> Void
+    @State private var bracketAssets: [PHAsset]
     @State private var currentIndex = 0
     @State private var showProcessed = true
     @State private var showMetadata = false
@@ -18,6 +18,11 @@ struct ImageViewer: View {
     @State private var showDeleteConfirmation = false
 
     private let imageManager = PHCachingImageManager()
+
+    init(bracketAssets: [PHAsset], onDismiss: @escaping () -> Void) {
+        self.onDismiss = onDismiss
+        _bracketAssets = State(initialValue: bracketAssets)
+    }
 
     var body: some View {
         ZStack {
@@ -206,7 +211,12 @@ struct ImageViewer: View {
 
             // EXIF Viewer overlay
             if showMetadata, let metadata = currentMetadata, let image = currentImage {
-                EXIFViewer(asset: bracketAssets[currentIndex], metadata: metadata, image: image)
+                EXIFViewer(
+                    asset: bracketAssets[currentIndex],
+                    metadata: metadata,
+                    image: image,
+                    onDismiss: { showMetadata = false }
+                )
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
@@ -266,11 +276,19 @@ struct ImageViewer: View {
 
     private func loadMetadata(for asset: PHAsset) {
         let options = PHContentEditingInputRequestOptions()
+        options.isNetworkAccessAllowed = true
         asset.requestContentEditingInput(with: options) { input, info in
-            guard let input = input else { return }
+            guard let input, let fullSizeImageURL = input.fullSizeImageURL else {
+                DispatchQueue.main.async {
+                    self.currentMetadata = nil
+                }
+                return
+            }
 
-            let fullImage = CIImage(contentsOf: input.fullSizeImageURL!)
-            self.currentMetadata = fullImage?.properties
+            let fullImage = CIImage(contentsOf: fullSizeImageURL)
+            DispatchQueue.main.async {
+                self.currentMetadata = fullImage?.properties
+            }
         }
     }
 
@@ -339,15 +357,17 @@ struct ImageViewer: View {
                 DispatchQueue.main.async {
                     Logger.photo("Deleted bracket photo at index \(self.currentIndex)")
                     HapticManager.shared.gridTypeChanged()
-                    // If no photos remain, dismiss the viewer
-                    if self.bracketAssets.count <= 1 {
+                    self.bracketAssets.remove(at: self.currentIndex)
+                    self.currentMetadata = nil
+                    self.currentImage = nil
+                    self.showMetadata = false
+
+                    if self.bracketAssets.isEmpty {
                         self.onDismiss()
-                    } else if self.currentIndex >= self.bracketAssets.count - 1 {
-                        // Was last photo — move to previous
+                    } else if self.currentIndex >= self.bracketAssets.count {
                         self.currentIndex = max(0, self.currentIndex - 1)
                         self.loadImage(at: self.currentIndex)
                     } else {
-                        // Reload current index (next photo slides into place)
                         self.loadImage(at: self.currentIndex)
                     }
                 }

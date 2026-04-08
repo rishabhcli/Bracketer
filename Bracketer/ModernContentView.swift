@@ -6,22 +6,21 @@ import Photos
 /// Implements iOS 18+ design patterns and modern camera controls
 
 struct ModernContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var camera = CameraController()
     @StateObject private var motionManager = MotionLevelManager()
     @StateObject private var orientationManager = OrientationManager()
     @StateObject private var settings = SettingsStore()
 
+    private let disablesStartupSideEffectsForUITests = ProcessInfo.processInfo.arguments.contains("-ui-testing-disable-camera-startup")
+
     // Transient UI state (not persisted)
     @State private var showProControls = false
     @State private var showSettings = false
     @State private var showModeChangeToast = false
-    @State private var previousMode: ShootingMode = .auto
     @State private var selectedZoom: CameraZoomLevel = .wide
     @State private var currentEVCompensation: Float = 0.0
     @State private var evCompensationLocked = false
-
-    // Focus peaking colors
-    private let focusPeakingColors: [Color] = [.red, .blue, .yellow, .green, .orange, .purple, .white]
 
     // Cancellable task for toast auto-hide
     @State private var toastHideTask: DispatchWorkItem?
@@ -175,7 +174,10 @@ struct ModernContentView: View {
                         showLevel: $settings.showLevel,
                         focusPeakingEnabled: $settings.focusPeakingEnabled,
                         focusPeakingColor: $settings.focusPeakingColor,
-                        focusPeakingIntensity: $settings.focusPeakingIntensity
+                        focusPeakingIntensity: $settings.focusPeakingIntensity,
+                        teleUses12MP: $settings.teleUses12MP,
+                        flashMode: $settings.flashMode,
+                        timerMode: $settings.timerMode
                     )
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
@@ -189,8 +191,13 @@ struct ModernContentView: View {
                     ModernCaptureProgress(
                         progress: camera.captureProgress,
                         evStep: settings.selectedEVStep,
-                        totalShots: settings.bracketShotCount
+                        totalShots: settings.bracketShotCount,
+                        centerBias: currentEVCompensation
                     )
+                }
+
+                if let countdown = camera.countdownSecondsRemaining {
+                    ModernCountdownOverlay(secondsRemaining: countdown)
                 }
 
                 // Mode change toast notification
@@ -255,22 +262,43 @@ struct ModernContentView: View {
             HapticManager.shared.lensSwitched()
             camera.switchCamera(to: newValue.cameraKind)
         }
+        .onChange(of: currentEVCompensation) { _, newValue in
+            camera.setExposureCompensation(newValue)
+        }
+        .onChange(of: settings.teleUses12MP) { _, newValue in
+            camera.teleUses12MP = newValue
+            if camera.selectedCamera == .twoX || camera.selectedCamera == .eightX {
+                camera.switchCamera(to: camera.selectedCamera)
+            }
+        }
         .task {
             // Connect orientation manager to camera
             camera.orientationManager = orientationManager
-            await camera.start()
+            camera.teleUses12MP = settings.teleUses12MP
+            await resumeRuntimeServices()
             // Align the zoom UI with the active logical camera
             selectedZoom = CameraZoomLevel.forCameraKind(camera.selectedCamera)
         }
         .onAppear {
-            motionManager.start()
             motionManager.isLevelingActive = settings.showLevel
         }
         .environmentObject(orientationManager)
         .onDisappear {
             toastHideTask?.cancel()
             toastHideTask = nil
-            motionManager.stop()
+            suspendRuntimeServices()
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            switch newPhase {
+            case .active:
+                Task {
+                    await resumeRuntimeServices()
+                }
+            case .inactive, .background:
+                suspendRuntimeServices()
+            @unknown default:
+                break
+            }
         }
         .alert(item: $camera.lastError) { error in
             Alert(title: Text("Error"), message: Text(error.message), dismissButton: .default(Text("OK")))
@@ -307,6 +335,22 @@ struct ModernContentView: View {
         settings.showLevel.toggle()
         motionManager.isLevelingActive = settings.showLevel
         HapticManager.shared.gridTypeChanged()
+    }
+
+    private func resumeRuntimeServices() async {
+        guard !disablesStartupSideEffectsForUITests else { return }
+
+        motionManager.start()
+        motionManager.isLevelingActive = settings.showLevel
+        await camera.start()
+        camera.setExposureCompensation(currentEVCompensation)
+    }
+
+    private func suspendRuntimeServices() {
+        guard !disablesStartupSideEffectsForUITests else { return }
+
+        motionManager.stop()
+        camera.stop()
     }
 }
 
@@ -349,26 +393,39 @@ struct ModernTopBar: View {
     @Binding var currentShootingMode: ShootingMode
     let selectedEVStep: Float
     @Binding var showProControls: Bool
+    @Binding var flashMode: FlashMode
+    @Binding var timerMode: TimerMode
     let isGridActive: Bool
     let isLevelActive: Bool
     let onGridToggle: () -> Void
     let onLevelToggle: () -> Void
 
+    private var captureConfiguration: EffectiveCaptureConfiguration {
+        camera.effectiveCaptureConfiguration(flashMode: flashMode, timerMode: timerMode)
+    }
+
     var body: some View {
         HStack {
             // Left side - Status indicators only
             HStack(spacing: ModernDesignSystem.Spacing.sm) {
-                if camera.isProRAWEnabled {
-                    Text("ProRAW")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(.yellow)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(
-                            Capsule()
-                                .fill(.ultraThinMaterial)
-                                .opacity(0.8)
-                        )
+                ModernTopBarStatusBadge(
+                    icon: "photo",
+                    label: captureConfiguration.formatBadgeLabel,
+                    tint: camera.isProRAWEnabled ? .yellow : .white.opacity(0.16)
+                )
+
+                ModernTopBarStatusBadge(
+                    icon: captureConfiguration.flashIconName,
+                    label: captureConfiguration.flashBadgeLabel,
+                    tint: flashBadgeTint
+                )
+
+                if let timerBadgeLabel = captureConfiguration.timerBadgeLabel {
+                    ModernTopBarStatusBadge(
+                        icon: "timer",
+                        label: timerBadgeLabel,
+                        tint: .orange.opacity(0.22)
+                    )
                 }
             }
 
@@ -391,6 +448,14 @@ struct ModernTopBar: View {
         .padding(.top, 12)
         .padding(.bottom, 12)
         .background(.ultraThinMaterial.opacity(0.95))
+    }
+
+    private var flashBadgeTint: Color {
+        guard camera.isFlashAvailable else {
+            return .gray.opacity(0.22)
+        }
+
+        return flashMode == .off ? .white.opacity(0.16) : .yellow.opacity(0.22)
     }
 }
 
@@ -417,7 +482,7 @@ struct ModernBottomControls: View {
         VStack(spacing: ModernDesignSystem.Spacing.md) {
             // Secondary controls row (moved from top bar)
             HStack(spacing: 16) {
-                ModernFlashButton(flashMode: $flashMode)
+                ModernFlashButton(flashMode: $flashMode, isAvailable: camera.isFlashAvailable)
                 ModernTimerButton(timerMode: $timerMode)
                 ModernToggleButton(
                     icon: "square.grid.3x3",
@@ -444,7 +509,13 @@ struct ModernBottomControls: View {
                     progress: camera.captureProgress,
                     totalSteps: bracketShotCount
                 ) {
-                    camera.captureLockdownBracket(evStep: selectedEVStep, shotCount: bracketShotCount)
+                    camera.captureLockdownBracket(
+                        evStep: selectedEVStep,
+                        shotCount: bracketShotCount,
+                        flashMode: flashMode,
+                        timerMode: timerMode,
+                        exposureCompensation: currentEVCompensation
+                    )
                 }
 
                 // Settings
@@ -460,9 +531,10 @@ struct ModernBottomControls: View {
 
 struct ModernFlashButton: View {
     @Binding var flashMode: FlashMode
+    let isAvailable: Bool
 
     var body: some View {
-        FlashModeMenu(flashMode: $flashMode, style: .legacy)
+        FlashModeMenu(flashMode: $flashMode, isAvailable: isAvailable, style: .legacy)
     }
 }
 
@@ -603,6 +675,7 @@ struct ModernPhotoLibraryButton: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Photo Library")
+        .accessibilityIdentifier("camera.photoLibraryButton")
     }
 }
 
@@ -686,6 +759,7 @@ struct ModernSettingsButton: View {
         .buttonStyle(.plain)
         .accessibilityLabel("Settings")
         .accessibilityValue(showSettings ? "Open" : "Closed")
+        .accessibilityIdentifier("camera.settingsButton")
     }
 }
 
@@ -747,21 +821,17 @@ struct ModernCaptureProgress: View {
     let progress: Int
     let evStep: Float
     let totalShots: Int
+    let centerBias: Float
 
-    init(progress: Int, evStep: Float, totalShots: Int = 3) {
+    init(progress: Int, evStep: Float, totalShots: Int = 3, centerBias: Float = 0) {
         self.progress = progress
         self.evStep = evStep
         self.totalShots = totalShots
+        self.centerBias = centerBias
     }
 
-    /// Build EV offsets matching CameraController.buildBracketEVOffsets
     private var evOffsets: [Float] {
-        switch totalShots {
-        case 3: return [-evStep, 0, +evStep]
-        case 5: return [-2*evStep, -evStep, 0, +evStep, +2*evStep]
-        case 7: return [-3*evStep, -2*evStep, -evStep, 0, +evStep, +2*evStep, +3*evStep]
-        default: return [-evStep, 0, +evStep]
-        }
+        BracketSequencePlanner.evOffsets(evStep: evStep, shotCount: totalShots, centerBias: centerBias)
     }
 
     private var progressText: String {
@@ -819,6 +889,33 @@ struct ModernCaptureProgress: View {
     }
 }
 
+struct ModernCountdownOverlay: View {
+    let secondsRemaining: Int
+
+    var body: some View {
+        ZStack {
+            ModernDesignSystem.Colors.cameraOverlay.ignoresSafeArea()
+
+            VStack(spacing: ModernDesignSystem.Spacing.md) {
+                Text("\(secondsRemaining)")
+                    .font(.system(size: 72, weight: .bold, design: .rounded))
+                    .foregroundColor(ModernDesignSystem.Colors.cameraControlActive)
+                    .monospacedDigit()
+
+                Text("Timer countdown")
+                    .font(ModernDesignSystem.Typography.body)
+                    .foregroundColor(ModernDesignSystem.Colors.cameraControl)
+
+                Text("Get ready for bracket capture")
+                    .font(ModernDesignSystem.Typography.caption)
+                    .foregroundColor(ModernDesignSystem.Colors.cameraControlSecondary)
+            }
+            .padding(ModernDesignSystem.Spacing.xl)
+            .modernCardStyle(.overlay)
+        }
+    }
+}
+
 // MARK: - Enhanced Top Bar with iOS 26 Components
 
 @available(iOS 26.0, *)
@@ -834,20 +931,32 @@ struct ModernTopBarEnhanced: View {
     let onGridToggle: () -> Void
     let onLevelToggle: () -> Void
 
+    private var captureConfiguration: EffectiveCaptureConfiguration {
+        camera.effectiveCaptureConfiguration(flashMode: flashMode, timerMode: timerMode)
+    }
+
     var body: some View {
         HStack {
             // Left side - Status indicators only
             HStack(spacing: 8) {
-                if camera.isProRAWEnabled {
-                    Text("ProRAW")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(.yellow)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(
-                            Capsule()
-                                .liquidGlass(intensity: .subtle, tint: .yellow.opacity(0.2))
-                        )
+                ModernTopBarStatusBadge(
+                    icon: "photo",
+                    label: captureConfiguration.formatBadgeLabel,
+                    tint: camera.isProRAWEnabled ? .yellow.opacity(0.2) : .white.opacity(0.1)
+                )
+
+                ModernTopBarStatusBadge(
+                    icon: captureConfiguration.flashIconName,
+                    label: captureConfiguration.flashBadgeLabel,
+                    tint: flashBadgeTint
+                )
+
+                if let timerBadgeLabel = captureConfiguration.timerBadgeLabel {
+                    ModernTopBarStatusBadge(
+                        icon: "timer",
+                        label: timerBadgeLabel,
+                        tint: .orange.opacity(0.2)
+                    )
                 }
             }
 
@@ -870,6 +979,14 @@ struct ModernTopBarEnhanced: View {
         .padding(.top, 12)
         .padding(.bottom, 12)
         .background(.ultraThinMaterial.opacity(0.95))
+    }
+
+    private var flashBadgeTint: Color {
+        guard camera.isFlashAvailable else {
+            return .gray.opacity(0.18)
+        }
+
+        return flashMode == .off ? .white.opacity(0.1) : .yellow.opacity(0.2)
     }
 }
 
@@ -899,7 +1016,7 @@ struct ModernBottomControlsEnhanced: View {
         VStack(spacing: 12) {
             // Secondary controls row (moved from top bar) - all in thumb reach
             HStack(spacing: 16) {
-                FlashModeControl(flashMode: $flashMode)
+                FlashModeControl(flashMode: $flashMode, isAvailable: camera.isFlashAvailable)
                 TimerModeControl(timerMode: $timerMode)
                 ModernToggleButton(
                     icon: "square.grid.3x3",
@@ -925,7 +1042,13 @@ struct ModernBottomControlsEnhanced: View {
                     isCapturing: camera.isCapturing,
                     progress: Double(camera.captureProgress) / Double(max(1, bracketShotCount))
                 ) {
-                    camera.captureLockdownBracket(evStep: selectedEVStep, shotCount: bracketShotCount)
+                    camera.captureLockdownBracket(
+                        evStep: selectedEVStep,
+                        shotCount: bracketShotCount,
+                        flashMode: flashMode,
+                        timerMode: timerMode,
+                        exposureCompensation: currentEVCompensation
+                    )
                 }
 
                 // Settings
@@ -940,6 +1063,30 @@ struct ModernBottomControlsEnhanced: View {
             )
             .padding(.bottom, 40)
         }
+    }
+}
+
+struct ModernTopBarStatusBadge: View {
+    let icon: String
+    let label: String
+    let tint: Color
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.system(size: 11, weight: .semibold))
+
+            Text(label)
+                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .monospacedDigit()
+        }
+        .foregroundColor(.white.opacity(0.95))
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(
+            Capsule()
+                .liquidGlass(intensity: .subtle, tint: tint, interactive: false)
+        )
     }
 }
 

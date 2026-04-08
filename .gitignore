@@ -1,0 +1,19 @@
+.DS_Store
+DerivedData/
+build/
+*.xcresult
+
+# Xcode user data
+xcuserdata/
+*.xcuserstate
+*.xccheckout
+*.moved-aside
+
+# SwiftPM
+.build/
+.swiftpm/
+
+# Fastlane / screenshots
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/
