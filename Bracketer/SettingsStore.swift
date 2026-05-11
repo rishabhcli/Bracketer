@@ -5,9 +5,9 @@ import SwiftUI
 /// Replaces ephemeral @State properties so user preferences survive app restarts.
 
 final class SettingsStore: ObservableObject {
-    private static let defaults = UserDefaults.standard
+    private let defaults: UserDefaults
 
-    private enum Keys {
+    enum Keys {
         static let showGrid = "settings.showGrid"
         static let gridType = "settings.gridType"
         static let showLevel = "settings.showLevel"
@@ -22,82 +22,134 @@ final class SettingsStore: ObservableObject {
         static let teleUses12MP = "settings.teleUses12MP"
     }
 
+    private enum Defaults {
+        static let showGrid = true
+        static let gridType = GridType.ruleOfThirds
+        static let showLevel = true
+        static let focusPeakingEnabled = false
+        static let focusPeakingColor = Color.red
+        static let focusPeakingIntensity: Float = 0.5
+        static let selectedEVStep: Float = 1.0
+        static let bracketShotCount = 3
+        static let currentShootingMode = ShootingMode.auto
+        static let flashMode = FlashMode.off
+        static let timerMode = TimerMode.off
+        static let teleUses12MP = false
+    }
+
+    private static let focusPeakingIntensityRange: ClosedRange<Float> = 0.1...1.0
+    private static let supportedEVSteps: [Float] = [1.0, 2.0, 3.0]
+    private static let supportedBracketShotCounts = BracketPlan.supportedShotCounts
+
     // MARK: - Viewfinder
 
     @Published var showGrid: Bool {
-        didSet { Self.defaults.set(showGrid, forKey: Keys.showGrid) }
+        didSet { defaults.set(showGrid, forKey: Keys.showGrid) }
     }
 
     @Published var gridType: GridType {
-        didSet { Self.defaults.set(gridType.rawValue, forKey: Keys.gridType) }
+        didSet { defaults.set(gridType.rawValue, forKey: Keys.gridType) }
     }
 
     @Published var showLevel: Bool {
-        didSet { Self.defaults.set(showLevel, forKey: Keys.showLevel) }
+        didSet { defaults.set(showLevel, forKey: Keys.showLevel) }
     }
 
     // MARK: - Focus Peaking
 
     @Published var focusPeakingEnabled: Bool {
-        didSet { Self.defaults.set(focusPeakingEnabled, forKey: Keys.focusPeakingEnabled) }
+        didSet { defaults.set(focusPeakingEnabled, forKey: Keys.focusPeakingEnabled) }
     }
 
     @Published var focusPeakingColor: Color {
-        didSet { Self.defaults.set(colorName(focusPeakingColor), forKey: Keys.focusPeakingColor) }
+        didSet { defaults.set(colorName(focusPeakingColor), forKey: Keys.focusPeakingColor) }
     }
 
     @Published var focusPeakingIntensity: Float {
-        didSet { Self.defaults.set(focusPeakingIntensity, forKey: Keys.focusPeakingIntensity) }
+        didSet {
+            let resolved = Self.normalizedFocusPeakingIntensity(focusPeakingIntensity)
+            if focusPeakingIntensity != resolved {
+                focusPeakingIntensity = resolved
+                return
+            }
+            defaults.set(resolved, forKey: Keys.focusPeakingIntensity)
+        }
     }
 
     // MARK: - Bracketing
 
     @Published var selectedEVStep: Float {
-        didSet { Self.defaults.set(selectedEVStep, forKey: Keys.selectedEVStep) }
+        didSet {
+            let resolved = Self.normalizedEVStep(selectedEVStep)
+            if selectedEVStep != resolved {
+                selectedEVStep = resolved
+                return
+            }
+            defaults.set(resolved, forKey: Keys.selectedEVStep)
+        }
     }
 
     @Published var bracketShotCount: Int {
-        didSet { Self.defaults.set(bracketShotCount, forKey: Keys.bracketShotCount) }
+        didSet {
+            let resolved = Self.normalizedBracketShotCount(bracketShotCount)
+            if bracketShotCount != resolved {
+                bracketShotCount = resolved
+                return
+            }
+            defaults.set(resolved, forKey: Keys.bracketShotCount)
+        }
     }
 
     // MARK: - Shooting Mode & Controls
 
     @Published var currentShootingMode: ShootingMode {
-        didSet { Self.defaults.set(currentShootingMode.rawValue, forKey: Keys.shootingMode) }
+        didSet { defaults.set(currentShootingMode.rawValue, forKey: Keys.shootingMode) }
     }
 
     @Published var flashMode: FlashMode {
-        didSet { Self.defaults.set(flashModeKey(flashMode), forKey: Keys.flashMode) }
+        didSet { defaults.set(flashModeKey(flashMode), forKey: Keys.flashMode) }
     }
 
     @Published var timerMode: TimerMode {
-        didSet { Self.defaults.set(timerModeKey(timerMode), forKey: Keys.timerMode) }
+        didSet { defaults.set(timerModeKey(timerMode), forKey: Keys.timerMode) }
     }
 
     @Published var teleUses12MP: Bool {
-        didSet { Self.defaults.set(teleUses12MP, forKey: Keys.teleUses12MP) }
+        didSet { defaults.set(teleUses12MP, forKey: Keys.teleUses12MP) }
     }
 
     // MARK: - Init (load persisted values)
 
-    init() {
-        let d = Self.defaults
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
 
-        self.showGrid = d.object(forKey: Keys.showGrid) as? Bool ?? true
-        self.gridType = GridType(rawValue: d.string(forKey: Keys.gridType) ?? "") ?? .ruleOfThirds
-        self.showLevel = d.object(forKey: Keys.showLevel) as? Bool ?? true
+        self.showGrid = defaults.object(forKey: Keys.showGrid) as? Bool ?? Defaults.showGrid
+        self.gridType = GridType(rawValue: defaults.string(forKey: Keys.gridType) ?? "") ?? Defaults.gridType
+        self.showLevel = defaults.object(forKey: Keys.showLevel) as? Bool ?? Defaults.showLevel
 
-        self.focusPeakingEnabled = d.object(forKey: Keys.focusPeakingEnabled) as? Bool ?? false
-        self.focusPeakingColor = Self.colorFromName(d.string(forKey: Keys.focusPeakingColor) ?? "red")
-        self.focusPeakingIntensity = d.object(forKey: Keys.focusPeakingIntensity) as? Float ?? 0.5
+        self.focusPeakingEnabled = defaults.object(forKey: Keys.focusPeakingEnabled) as? Bool ?? Defaults.focusPeakingEnabled
+        self.focusPeakingColor = Self.colorFromName(defaults.string(forKey: Keys.focusPeakingColor) ?? "red")
+        self.focusPeakingIntensity = Self.normalizedFocusPeakingIntensity(
+            Self.floatValue(forKey: Keys.focusPeakingIntensity, in: defaults) ?? Defaults.focusPeakingIntensity
+        )
 
-        self.selectedEVStep = d.object(forKey: Keys.selectedEVStep) as? Float ?? 1.0
-        self.bracketShotCount = d.object(forKey: Keys.bracketShotCount) as? Int ?? 3
+        self.selectedEVStep = Self.normalizedEVStep(
+            Self.floatValue(forKey: Keys.selectedEVStep, in: defaults) ?? Defaults.selectedEVStep
+        )
+        self.bracketShotCount = Self.normalizedBracketShotCount(
+            defaults.object(forKey: Keys.bracketShotCount) as? Int ?? Defaults.bracketShotCount
+        )
 
-        self.currentShootingMode = ShootingMode(rawValue: d.string(forKey: Keys.shootingMode) ?? "") ?? .auto
-        self.flashMode = Self.flashModeFromKey(d.string(forKey: Keys.flashMode) ?? "off")
-        self.timerMode = Self.timerModeFromKey(d.string(forKey: Keys.timerMode) ?? "off")
-        self.teleUses12MP = d.object(forKey: Keys.teleUses12MP) as? Bool ?? false
+        self.currentShootingMode = ShootingMode(rawValue: defaults.string(forKey: Keys.shootingMode) ?? "") ?? Defaults.currentShootingMode
+        self.flashMode = Self.flashModeFromKey(defaults.string(forKey: Keys.flashMode) ?? Self.flashModeKey(Defaults.flashMode))
+        self.timerMode = Self.timerModeFromKey(defaults.string(forKey: Keys.timerMode) ?? Self.timerModeKey(Defaults.timerMode))
+        self.teleUses12MP = defaults.object(forKey: Keys.teleUses12MP) as? Bool ?? Defaults.teleUses12MP
+
+        if ProcessInfo.processInfo.arguments.contains("-ui-testing-reset-settings") {
+            resetToDefaults()
+        } else {
+            persistResolvedValues()
+        }
     }
 
     // MARK: - Presets
@@ -109,6 +161,62 @@ final class SettingsStore: ObservableObject {
         focusPeakingEnabled = preset.focusPeakingEnabled
         focusPeakingColor = preset.focusPeakingColor
         focusPeakingIntensity = preset.focusPeakingIntensity
+    }
+
+    func resetToDefaults() {
+        showGrid = Defaults.showGrid
+        gridType = Defaults.gridType
+        showLevel = Defaults.showLevel
+        focusPeakingEnabled = Defaults.focusPeakingEnabled
+        focusPeakingColor = Defaults.focusPeakingColor
+        focusPeakingIntensity = Defaults.focusPeakingIntensity
+        selectedEVStep = Defaults.selectedEVStep
+        bracketShotCount = Defaults.bracketShotCount
+        currentShootingMode = Defaults.currentShootingMode
+        flashMode = Defaults.flashMode
+        timerMode = Defaults.timerMode
+        teleUses12MP = Defaults.teleUses12MP
+    }
+
+    private func persistResolvedValues() {
+        defaults.set(showGrid, forKey: Keys.showGrid)
+        defaults.set(gridType.rawValue, forKey: Keys.gridType)
+        defaults.set(showLevel, forKey: Keys.showLevel)
+        defaults.set(focusPeakingEnabled, forKey: Keys.focusPeakingEnabled)
+        defaults.set(colorName(focusPeakingColor), forKey: Keys.focusPeakingColor)
+        defaults.set(focusPeakingIntensity, forKey: Keys.focusPeakingIntensity)
+        defaults.set(selectedEVStep, forKey: Keys.selectedEVStep)
+        defaults.set(bracketShotCount, forKey: Keys.bracketShotCount)
+        defaults.set(currentShootingMode.rawValue, forKey: Keys.shootingMode)
+        defaults.set(flashModeKey(flashMode), forKey: Keys.flashMode)
+        defaults.set(timerModeKey(timerMode), forKey: Keys.timerMode)
+        defaults.set(teleUses12MP, forKey: Keys.teleUses12MP)
+    }
+
+    private static func normalizedFocusPeakingIntensity(_ value: Float) -> Float {
+        guard value.isFinite else { return Defaults.focusPeakingIntensity }
+        return min(max(value, focusPeakingIntensityRange.lowerBound), focusPeakingIntensityRange.upperBound)
+    }
+
+    private static func floatValue(forKey key: String, in defaults: UserDefaults) -> Float? {
+        defaults.object(forKey: key) == nil ? nil : defaults.float(forKey: key)
+    }
+
+    private static func normalizedEVStep(_ value: Float) -> Float {
+        guard value.isFinite else { return Defaults.selectedEVStep }
+        return nearestSupportedFloat(value, supportedValues: supportedEVSteps)
+    }
+
+    private static func normalizedBracketShotCount(_ value: Int) -> Int {
+        guard let first = supportedBracketShotCounts.first else { return Defaults.bracketShotCount }
+        let clamped = min(max(value, first), supportedBracketShotCounts.last ?? first)
+        return supportedBracketShotCounts.min { abs($0 - clamped) < abs($1 - clamped) } ?? Defaults.bracketShotCount
+    }
+
+    private static func nearestSupportedFloat(_ value: Float, supportedValues: [Float]) -> Float {
+        guard let first = supportedValues.first else { return value }
+        let clamped = min(max(value, first), supportedValues.last ?? first)
+        return supportedValues.min { abs($0 - clamped) < abs($1 - clamped) } ?? first
     }
 
     // MARK: - Color Mapping
@@ -129,6 +237,10 @@ final class SettingsStore: ObservableObject {
     // MARK: - FlashMode Mapping
 
     private func flashModeKey(_ mode: FlashMode) -> String {
+        Self.flashModeKey(mode)
+    }
+
+    private static func flashModeKey(_ mode: FlashMode) -> String {
         switch mode {
         case .auto: return "auto"
         case .on: return "on"
@@ -147,6 +259,10 @@ final class SettingsStore: ObservableObject {
     // MARK: - TimerMode Mapping
 
     private func timerModeKey(_ mode: TimerMode) -> String {
+        Self.timerModeKey(mode)
+    }
+
+    private static func timerModeKey(_ mode: TimerMode) -> String {
         switch mode {
         case .off: return "off"
         case .threeSeconds: return "3s"

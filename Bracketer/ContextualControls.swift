@@ -19,6 +19,15 @@ enum ControlContext {
         case .night: return .night
         }
     }
+
+    var accessibilityValue: String {
+        switch self {
+        case .auto: return "Auto"
+        case .manual: return "Manual"
+        case .bracket: return "Bracket"
+        case .night: return "Night"
+        }
+    }
 }
 
 // MARK: - Context-Aware Bottom Controls
@@ -48,30 +57,36 @@ struct ContextualBottomControls: View {
     }
 
     var body: some View {
+        let bracketProgress = camera.bracketSequenceState.progress
+
         VStack(spacing: 16) {
             // Context-aware secondary controls row
             contextualSecondaryControls
+                .overlay(alignment: .topLeading) {
+                    CameraChromeProbe(
+                        identifier: "camera.secondaryControls",
+                        label: "Camera Secondary Controls",
+                        value: context.accessibilityValue
+                    )
+                }
 
             // Main control row (always visible)
             HStack(spacing: 44) {
                 ModernPhotoLibraryButton(camera: camera)
 
                 EnhancedShutterButton(
-                    isCapturing: camera.isCapturing,
-                    progress: Double(camera.captureProgress) / Double(max(1, bracketShotCount))
+                    isCapturing: camera.bracketSequenceState.isActive,
+                    progress: bracketProgress.fraction
                 ) {
-                    camera.captureLockdownBracket(
-                        evStep: selectedEVStep,
-                        shotCount: bracketShotCount,
-                        flashMode: flashMode,
-                        timerMode: timerMode,
-                        exposureCompensation: currentEVCompensation
-                    )
+                    captureBracket()
                 }
 
                 ModernSettingsButton(showSettings: $showSettings)
             }
             .padding(.horizontal, 20)
+            .overlay(alignment: .topLeading) {
+                CameraChromeProbe(identifier: "camera.primaryControls", label: "Camera Primary Controls")
+            }
 
             // Zoom selector at very bottom
             CameraZoomControl(
@@ -80,6 +95,19 @@ struct ContextualBottomControls: View {
             )
             .padding(.bottom, 40)
         }
+        .overlay(alignment: .topLeading) {
+            CameraChromeProbe(identifier: "camera.bottomControls", label: "Camera Bottom Controls")
+        }
+    }
+
+    private func captureBracket() {
+        camera.captureLockdownBracket(
+            evStep: selectedEVStep,
+            shotCount: bracketShotCount,
+            flashMode: flashMode,
+            timerMode: timerMode,
+            exposureCompensation: currentEVCompensation
+        )
     }
 
     @ViewBuilder
@@ -107,14 +135,19 @@ struct ContextualBottomControls: View {
 
             ModernToggleButton(
                 icon: "square.grid.3x3",
+                accessibilityID: "camera.gridToggleButton",
+                accessibilityLabel: "Grid Overlay",
                 isActive: isGridActive,
                 onTap: onGridToggle
             )
             ModernToggleButton(
                 icon: "level",
+                accessibilityID: "camera.levelToggleButton",
+                accessibilityLabel: "Level Indicator",
                 isActive: isLevelActive,
                 onTap: onLevelToggle
             )
+            ModernProControlButton(showProControls: $showProControls)
         }
         .padding(.horizontal, 24)
         .transition(.opacity.combined(with: .move(edge: .top)))
@@ -141,9 +174,12 @@ struct ContextualBottomControls: View {
 
             ModernToggleButton(
                 icon: "level",
+                accessibilityID: "camera.levelToggleButton",
+                accessibilityLabel: "Level Indicator",
                 isActive: isLevelActive,
                 onTap: onLevelToggle
             )
+            ModernProControlButton(showProControls: $showProControls)
         }
         .padding(.horizontal, 24)
         .transition(.opacity.combined(with: .move(edge: .top)))
@@ -163,6 +199,8 @@ struct ContextualBottomControls: View {
             )
 
             Spacer()
+
+            ModernProControlButton(showProControls: $showProControls)
         }
         .padding(.horizontal, 24)
         .transition(.opacity.combined(with: .move(edge: .top)))
@@ -183,9 +221,12 @@ struct ContextualBottomControls: View {
 
             ModernToggleButton(
                 icon: "level",
+                accessibilityID: "camera.levelToggleButton",
+                accessibilityLabel: "Level Indicator",
                 isActive: isLevelActive,
                 onTap: onLevelToggle
             )
+            ModernProControlButton(showProControls: $showProControls)
         }
         .padding(.horizontal, 24)
         .transition(.opacity.combined(with: .move(edge: .top)))

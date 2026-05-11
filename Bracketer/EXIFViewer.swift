@@ -335,46 +335,17 @@ struct EXIFViewer: View {
             bitsPerComponent: 8,
             bytesPerRow: bytesPerRow,
             space: colorSpace,
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
         ) else { return }
 
         context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
 
-        var redBins = [Int](repeating: 0, count: 256)
-        var greenBins = [Int](repeating: 0, count: 256)
-        var blueBins = [Int](repeating: 0, count: 256)
-        var lumBins = [Int](repeating: 0, count: 256)
-
-        // Sample every 4th pixel in both dimensions for performance
-        let step = 4
-        for y in stride(from: 0, to: height, by: step) {
-            let rowOffset = y * bytesPerRow
-            for x in stride(from: 0, to: width, by: step) {
-                let offset = rowOffset + x * bytesPerPixel
-                let r = Int(pixelData[offset])
-                let g = Int(pixelData[offset + 1])
-                let b = Int(pixelData[offset + 2])
-
-                redBins[r] += 1
-                greenBins[g] += 1
-                blueBins[b] += 1
-
-                let lum = Int(Float(r) * 0.2126 + Float(g) * 0.7152 + Float(b) * 0.0722)
-                lumBins[min(255, lum)] += 1
-            }
-        }
-
-        let maxR = Float(redBins.max() ?? 1)
-        let maxG = Float(greenBins.max() ?? 1)
-        let maxB = Float(blueBins.max() ?? 1)
-        let maxL = Float(lumBins.max() ?? 1)
-
-        histogramData = HistogramData(
-            red: redBins.map { Float($0) / maxR },
-            green: greenBins.map { Float($0) / maxG },
-            blue: blueBins.map { Float($0) / maxB },
-            luminance: lumBins.map { Float($0) / maxL }
-        )
+        histogramData = HistogramFrameAnalyzer.analyzeRGBABytes(
+            pixelData,
+            width: width,
+            height: height,
+            bytesPerRow: bytesPerRow
+        )?.histogram
     }
 
     private func formatAperture(_ value: Double?) -> String {

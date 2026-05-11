@@ -2,13 +2,17 @@ import SwiftUI
 import Photos
 import CoreImage
 import CoreImage.CIFilterBuiltins
+import ImageIO
 import MapKit
+import QuartzCore
 
 /// High-performance image viewer for bracketed photo sequences
 /// Provides RAW/processed toggle, navigation, and professional review tools
 struct ImageViewer: View {
     let onDismiss: () -> Void
+    let bracketManifest: BracketManifest?
     @State private var bracketAssets: [PHAsset]
+    @State private var reviewSequence: BracketReviewSequence?
     @State private var currentIndex = 0
     @State private var showProcessed = true
     @State private var showMetadata = false
@@ -16,12 +20,20 @@ struct ImageViewer: View {
     @State private var currentImage: UIImage?
     @State private var currentMetadata: [String: Any]?
     @State private var showDeleteConfirmation = false
+    @State private var reviewDiagnostics = CameraRuntimeDiagnostics()
 
     private let imageManager = PHCachingImageManager()
 
-    init(bracketAssets: [PHAsset], onDismiss: @escaping () -> Void) {
+    init(
+        bracketAssets: [PHAsset],
+        reviewSequence: BracketReviewSequence? = nil,
+        bracketManifest: BracketManifest? = nil,
+        onDismiss: @escaping () -> Void
+    ) {
         self.onDismiss = onDismiss
+        self.bracketManifest = bracketManifest
         _bracketAssets = State(initialValue: bracketAssets)
+        _reviewSequence = State(initialValue: reviewSequence)
     }
 
     var body: some View {
@@ -32,12 +44,11 @@ struct ImageViewer: View {
                 // Main image display
                 ImageViewerContent(
                     image: image,
-                    bracketAssets: bracketAssets,
+                    assetCount: bracketAssets.count,
                     currentIndex: currentIndex,
                     showProcessed: showProcessed,
                     onIndexChange: { newIndex in
-                        currentIndex = newIndex
-                        loadImage(at: newIndex)
+                        selectImage(at: newIndex)
                     }
                 )
                 .gesture(
@@ -49,12 +60,10 @@ struct ImageViewer: View {
                             if abs(horizontalAmount) > abs(verticalAmount) {
                                 // Horizontal swipe - navigate bracket sequence
                                 if horizontalAmount > 0 && currentIndex > 0 {
-                                    currentIndex -= 1
-                                    loadImage(at: currentIndex)
+                                    selectImage(at: currentIndex - 1)
                                     HapticManager.shared.gridTypeChanged()
                                 } else if horizontalAmount < 0 && currentIndex < bracketAssets.count - 1 {
-                                    currentIndex += 1
-                                    loadImage(at: currentIndex)
+                                    selectImage(at: currentIndex + 1)
                                     HapticManager.shared.gridTypeChanged()
                                 }
                             }
@@ -72,142 +81,41 @@ struct ImageViewer: View {
                 }
             }
 
-            // Top control bar
-            VStack {
-                HStack {
-                    Button {
-                        withAnimation(.easeInOut) {
-                            onDismiss()
-                        }
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 20, weight: .medium))
-                            .foregroundColor(.white)
-                            .padding(12)
-                            .background(
-                                Circle()
-                                    .liquidGlass(intensity: .regular, tint: .white.opacity(0.15), interactive: true)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Close")
-
-                    Spacer()
-
-                    // Bracket navigation
-                    if bracketAssets.count > 1 {
-                        HStack(spacing: 4) {
-                            ForEach(0..<bracketAssets.count, id: \.self) { index in
-                                Circle()
-                                    .fill(index == currentIndex ? Color.yellow : Color.white.opacity(0.3))
-                                    .frame(width: 8, height: 8)
-                            }
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(Color.black.opacity(0.6))
-                        .cornerRadius(16)
-                    }
-
-                    if currentIndex < bracketAssets.count {
-                        let evText = evLabelForCurrentIndex()
-                        Text(evText)
-                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                            .foregroundColor(.yellow)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 6)
-                            .background(Color.black.opacity(0.6))
-                            .cornerRadius(12)
-                    }
-
-                    Spacer()
-
-                    // Metadata toggle
-                    Button {
-                        showMetadata.toggle()
-                        HapticManager.shared.gridTypeChanged()
-                    } label: {
-                        Image(systemName: showMetadata ? "info.circle.fill" : "info.circle")
-                            .font(.system(size: 20, weight: .medium))
-                            .foregroundColor(showMetadata ? .yellow : .white)
-                            .padding(12)
-                            .background(
-                                Circle()
-                                    .liquidGlass(intensity: .regular, tint: showMetadata ? .yellow.opacity(0.25) : .white.opacity(0.12), interactive: true)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Photo Info")
-                    .accessibilityValue(showMetadata ? "Showing" : "Hidden")
-                }
-                .padding(.horizontal, 20)
-                .padding(.top, 60)
-
-                Spacer()
-
-                // Bottom control bar
-                HStack {
-                    // RAW/Processed toggle
-                    Button {
-                        showProcessed.toggle()
-                        loadImage(at: currentIndex, forceReload: true)
-                        HapticManager.shared.gridTypeChanged()
-                    } label: {
-                        HStack(spacing: 8) {
-                            Text(showProcessed ? "JPG" : "RAW")
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundColor(.white)
-                            Image(systemName: showProcessed ? "photo" : "r.square")
-                                .font(.system(size: 16))
-                                .foregroundColor(.white)
-                        }
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 10)
-                        .background(
-                            Capsule()
-                                .liquidGlass(intensity: .regular, tint: .white.opacity(0.12), interactive: true)
-                        )
-                    }
-                    .buttonStyle(.plain)
-
-                    Spacer()
-
-                    // Action buttons
-                    HStack(spacing: 16) {
-                        Button {
-                            shareCurrentImage()
-                        } label: {
-                            Image(systemName: "square.and.arrow.up")
-                                .font(.system(size: 20, weight: .medium))
-                                .foregroundColor(.white)
-                                .padding(12)
-                                .background(
-                                    Circle()
-                                        .liquidGlass(intensity: .regular, tint: .white.opacity(0.12), interactive: true)
-                                )
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Share Photo")
-
-                        Button {
-                            showDeleteConfirmation = true
-                        } label: {
-                            Image(systemName: "trash")
-                                .font(.system(size: 20, weight: .medium))
-                                .foregroundColor(.red)
-                                .padding(12)
-                                .background(
-                                    Circle()
-                                        .liquidGlass(intensity: .prominent, tint: .red.opacity(0.25), interactive: true)
-                                )
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Delete Photo")
-                    }
-                }
-                .padding(.horizontal, 20)
-                .padding(.bottom, 40)
-            }
+            BracketLiveReviewChrome(
+                itemCount: bracketAssets.count,
+                currentIndex: currentIndex,
+                selectedEVLabel: evLabelForCurrentIndex(),
+                selectedShot: currentReviewShot,
+                showMetadata: showMetadata,
+                representationTitle: showProcessed ? "JPG" : "RAW",
+                representationIcon: showProcessed ? "photo" : "r.square",
+                representationAccessibilityValue: reviewRepresentationAccessibilityValue,
+                manifestJSON: manifestJSONString,
+                onDismiss: onDismiss,
+                onPrevious: { selectImage(at: currentIndex - 1) },
+                onNext: { selectImage(at: currentIndex + 1) },
+                onToggleMetadata: {
+                    showMetadata.toggle()
+                    HapticManager.shared.gridTypeChanged()
+                },
+                onToggleRepresentation: {
+                    toggleRepresentation()
+                    loadImage(at: currentIndex, forceReload: true)
+                    HapticManager.shared.gridTypeChanged()
+                },
+                onShare: shareCurrentImage,
+                onDelete: { showDeleteConfirmation = true }
+            )
+            ReviewFixtureProbe(
+                identifier: "review.diagnostics.summary",
+                label: "Review Diagnostics Summary",
+                value: reviewDiagnostics.summaryAccessibilityValue
+            )
+            ReviewFixtureProbe(
+                identifier: "review.diagnostics.latest",
+                label: "Review Latest Diagnostic",
+                value: reviewDiagnostics.latestAccessibilityValue
+            )
 
             // EXIF Viewer overlay
             if showMetadata, let metadata = currentMetadata, let image = currentImage {
@@ -236,11 +144,38 @@ struct ImageViewer: View {
         }
     }
 
+    private var currentReviewShot: BracketReviewShotSummary? {
+        reviewSequence?.selecting(index: currentIndex).selectedShot
+    }
+
+    private var manifestJSONString: String? {
+        try? bracketManifest?.jsonString()
+    }
+
+    private var reviewRepresentationAccessibilityValue: String {
+        reviewSequence?.selectedRepresentationAvailabilityLabel ?? (showProcessed ? "Processed" : "RAW")
+    }
+
+    private func selectImage(at index: Int) {
+        guard bracketAssets.indices.contains(index) else { return }
+
+        currentIndex = index
+        reviewSequence = reviewSequence?.selecting(index: index)
+        loadImage(at: index)
+    }
+
+    private func toggleRepresentation() {
+        showProcessed.toggle()
+        reviewSequence = reviewSequence?.togglingRepresentation()
+    }
+
     private func loadImage(at index: Int, forceReload: Bool = false) {
         guard index >= 0 && index < bracketAssets.count else { return }
 
+        let loadStart = CACurrentMediaTime()
         isLoading = true
         let asset = bracketAssets[index]
+        refreshResourceSummary(for: asset, at: index)
 
         let options = PHImageRequestOptions()
         options.deliveryMode = .highQualityFormat
@@ -258,9 +193,33 @@ struct ImageViewer: View {
                                 contentMode: .aspectFit,
                                 options: options) { image, info in
             DispatchQueue.main.async {
+                let durationMilliseconds = Self.elapsedMilliseconds(since: loadStart)
                 // Check for errors
                 if let error = info?[PHImageErrorKey] as? Error {
                     Logger.error("Failed to load image: \(error.localizedDescription)")
+                    self.recordReviewDiagnostic(
+                        severity: .error,
+                        title: "Review Image Load Failed",
+                        detail: "Image \(index + 1) of \(self.bracketAssets.count): \(error.localizedDescription)",
+                        durationMilliseconds: durationMilliseconds
+                    )
+                } else if image != nil {
+                    self.recordReviewDiagnostic(
+                        severity: CameraRuntimePerformanceThresholds.severity(
+                            durationMilliseconds: durationMilliseconds,
+                            warningThresholdMilliseconds: CameraRuntimePerformanceThresholds.reviewImageLoadWarningMilliseconds
+                        ),
+                        title: "Review Image Loaded",
+                        detail: "Image \(index + 1) of \(self.bracketAssets.count) loaded for review.",
+                        durationMilliseconds: durationMilliseconds
+                    )
+                } else {
+                    self.recordReviewDiagnostic(
+                        severity: .warning,
+                        title: "Review Image Missing",
+                        detail: "Photos returned no image for item \(index + 1) of \(self.bracketAssets.count).",
+                        durationMilliseconds: durationMilliseconds
+                    )
                 }
 
                 self.currentImage = image
@@ -275,21 +234,180 @@ struct ImageViewer: View {
     }
 
     private func loadMetadata(for asset: PHAsset) {
+        let metadataStart = CACurrentMediaTime()
         let options = PHContentEditingInputRequestOptions()
         options.isNetworkAccessAllowed = true
         asset.requestContentEditingInput(with: options) { input, info in
             guard let input, let fullSizeImageURL = input.fullSizeImageURL else {
                 DispatchQueue.main.async {
+                    let durationMilliseconds = Self.elapsedMilliseconds(since: metadataStart)
                     self.currentMetadata = nil
+                    self.updateMetadataAvailability(
+                        for: asset,
+                        availability: .unavailable(reason: "Full-size image metadata unavailable")
+                    )
+                    self.recordReviewDiagnostic(
+                        severity: .warning,
+                        title: "Review Metadata Unavailable",
+                        detail: "Full-size metadata input was unavailable.",
+                        durationMilliseconds: durationMilliseconds
+                    )
                 }
                 return
             }
 
             let fullImage = CIImage(contentsOf: fullSizeImageURL)
             DispatchQueue.main.async {
-                self.currentMetadata = fullImage?.properties
+                let durationMilliseconds = Self.elapsedMilliseconds(since: metadataStart)
+                let properties = fullImage?.properties
+                self.currentMetadata = properties
+                if let properties {
+                    let summary = Self.metadataSummary(from: properties)
+                    self.updateMetadataAvailability(
+                        for: asset,
+                        availability: .available(summary: summary.displaySummary)
+                    )
+                    self.recordReviewDiagnostic(
+                        severity: CameraRuntimePerformanceThresholds.severity(
+                            durationMilliseconds: durationMilliseconds,
+                            warningThresholdMilliseconds: CameraRuntimePerformanceThresholds.reviewMetadataLoadWarningMilliseconds
+                        ),
+                        title: "Review Metadata Loaded",
+                        detail: "\(summary.availableKeyCount) metadata key(s) loaded.",
+                        durationMilliseconds: durationMilliseconds
+                    )
+                } else {
+                    self.updateMetadataAvailability(
+                        for: asset,
+                        availability: .unavailable(reason: "Image metadata could not be decoded")
+                    )
+                    self.recordReviewDiagnostic(
+                        severity: .warning,
+                        title: "Review Metadata Decode Failed",
+                        detail: "Image metadata could not be decoded.",
+                        durationMilliseconds: durationMilliseconds
+                    )
+                }
             }
         }
+    }
+
+    private func refreshResourceSummary(for asset: PHAsset, at index: Int) {
+        let resources = PHAssetResource.assetResources(for: asset)
+        reviewSequence = reviewSequence?.updatingShot(
+            at: index,
+            resourceSummary: Self.resourceSummary(from: resources)
+        )
+    }
+
+    private func updateMetadataAvailability(
+        for asset: PHAsset,
+        availability: BracketReviewMetadataAvailability
+    ) {
+        guard bracketAssets.indices.contains(currentIndex),
+              bracketAssets[currentIndex].localIdentifier == asset.localIdentifier else {
+            return
+        }
+
+        reviewSequence = reviewSequence?.updatingShot(
+            at: currentIndex,
+            metadataAvailability: availability
+        )
+    }
+
+    private static func resourceSummary(from resources: [PHAssetResource]) -> BracketReviewResourceSummary {
+        guard !resources.isEmpty else { return .unavailable }
+
+        let hasRaw = resources.contains { resource in
+            resource.type == .alternatePhoto || fileExtension(for: resource.originalFilename) == "dng"
+        }
+        let hasProcessed = resources.contains { resource in
+            switch resource.type {
+            case .photo, .fullSizePhoto:
+                return true
+            default:
+                return ["heic", "heif", "jpg", "jpeg"].contains(fileExtension(for: resource.originalFilename))
+            }
+        }
+
+        let fileType: String
+        if hasRaw && hasProcessed {
+            fileType = "RAW + Processed"
+        } else if hasRaw {
+            fileType = "RAW"
+        } else if hasProcessed {
+            fileType = "HEIF/JPEG"
+        } else {
+            fileType = "Unknown"
+        }
+
+        var representations: [BracketReviewRepresentation] = []
+        if hasProcessed { representations.append(.processed) }
+        if hasRaw { representations.append(.raw) }
+
+        let filenames = resources.map(\.originalFilename).joined(separator: ", ")
+        return BracketReviewResourceSummary(
+            fileType: fileType,
+            availableRepresentations: representations,
+            detail: filenames.isEmpty ? "Asset resources available" : filenames
+        )
+    }
+
+    private static func metadataSummary(from properties: [String: Any]) -> BracketReviewMetadataSummary {
+        let exif = properties[kCGImagePropertyExifDictionary as String] as? [String: Any] ?? [:]
+        let tiff = properties[kCGImagePropertyTIFFDictionary as String] as? [String: Any] ?? [:]
+        let width = intValue(properties[kCGImagePropertyPixelWidth as String])
+        let height = intValue(properties[kCGImagePropertyPixelHeight as String])
+        let isoValues = exif[kCGImagePropertyExifISOSpeedRatings as String] as? [NSNumber]
+        let lensModel = exif[kCGImagePropertyExifLensModel as String] as? String
+        let cameraModel = tiff[kCGImagePropertyTIFFModel as String] as? String
+
+        let pixelSize: String?
+        if let width, let height {
+            pixelSize = "\(width) x \(height)"
+        } else {
+            pixelSize = nil
+        }
+
+        let isoDescription = isoValues?.map { "ISO \($0.intValue)" }.joined(separator: ", ")
+        let lensDescription = lensModel ?? cameraModel
+
+        return BracketReviewMetadataSummary(
+            availableKeyCount: properties.count + exif.count + tiff.count,
+            pixelSize: pixelSize,
+            isoDescription: isoDescription,
+            lensDescription: lensDescription
+        )
+    }
+
+    private static func intValue(_ value: Any?) -> Int? {
+        if let value = value as? Int { return value }
+        if let value = value as? NSNumber { return value.intValue }
+        return nil
+    }
+
+    private static func fileExtension(for filename: String) -> String {
+        URL(fileURLWithPath: filename).pathExtension.lowercased()
+    }
+
+    private func recordReviewDiagnostic(
+        severity: CameraRuntimeDiagnosticEvent.Severity,
+        title: String,
+        detail: String,
+        durationMilliseconds: Int
+    ) {
+        Logger.photo("[Review] \(title): \(detail) (\(durationMilliseconds) ms)", level: severity.loggerLevel)
+        reviewDiagnostics = reviewDiagnostics.recording(
+            category: .review,
+            severity: severity,
+            title: title,
+            detail: detail,
+            durationMilliseconds: durationMilliseconds
+        )
+    }
+
+    private static func elapsedMilliseconds(since startTime: TimeInterval) -> Int {
+        max(0, Int(((CACurrentMediaTime() - startTime) * 1_000).rounded()))
     }
 
     private func shareCurrentImage() {
@@ -358,16 +476,20 @@ struct ImageViewer: View {
                     Logger.photo("Deleted bracket photo at index \(self.currentIndex)")
                     HapticManager.shared.gridTypeChanged()
                     self.bracketAssets.remove(at: self.currentIndex)
+                    let updatedSequence = self.reviewSequence?.deletingSelected()
                     self.currentMetadata = nil
                     self.currentImage = nil
                     self.showMetadata = false
 
                     if self.bracketAssets.isEmpty {
+                        self.reviewSequence = updatedSequence
                         self.onDismiss()
                     } else if self.currentIndex >= self.bracketAssets.count {
                         self.currentIndex = max(0, self.currentIndex - 1)
+                        self.reviewSequence = updatedSequence?.selecting(index: self.currentIndex)
                         self.loadImage(at: self.currentIndex)
                     } else {
+                        self.reviewSequence = updatedSequence?.selecting(index: self.currentIndex)
                         self.loadImage(at: self.currentIndex)
                     }
                 }
@@ -378,10 +500,12 @@ struct ImageViewer: View {
     }
     
     private func evLabelForCurrentIndex() -> String {
+        if let reviewLabel = currentReviewShot?.displayLabel {
+            return reviewLabel
+        }
+
         guard currentIndex >= 0 && currentIndex < bracketAssets.count else { return "" }
-        // Try to infer from filename pattern in localIdentifier or metadata loaded earlier
-        // Since Photos API doesn't expose filename directly here, fall back to index mapping
-        // Map index to planned order [0EV, +EV, -EV] for 3 shots or [0, +, -, +2, -2]
+        // Fallback for a standalone recent asset opened without a bracket review sequence.
         switch bracketAssets.count {
         case 3:
             switch currentIndex { case 0: return "0 EV"; case 1: return "+ EV"; case 2: return "− EV"; default: return "" }
@@ -395,7 +519,7 @@ struct ImageViewer: View {
 
 struct ImageViewerContent: View {
     let image: UIImage
-    let bracketAssets: [PHAsset]
+    let assetCount: Int
     let currentIndex: Int
     let showProcessed: Bool
     let onIndexChange: (Int) -> Void
@@ -437,7 +561,431 @@ struct ImageViewerContent: View {
                         }
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .accessibilityLabel("Photo \(currentIndex + 1) of \(bracketAssets.count)")
+                .accessibilityLabel("Photo \(currentIndex + 1) of \(assetCount)")
+        }
+    }
+}
+
+private struct BracketLiveReviewChrome: View {
+    let itemCount: Int
+    let currentIndex: Int
+    let selectedEVLabel: String
+    let selectedShot: BracketReviewShotSummary?
+    let showMetadata: Bool
+    let representationTitle: String
+    let representationIcon: String
+    let representationAccessibilityValue: String
+    let manifestJSON: String?
+    let onDismiss: () -> Void
+    let onPrevious: () -> Void
+    let onNext: () -> Void
+    let onToggleMetadata: () -> Void
+    let onToggleRepresentation: () -> Void
+    let onShare: () -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        VStack {
+            HStack {
+                Button {
+                    withAnimation(.easeInOut) {
+                        onDismiss()
+                    }
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 20, weight: .medium))
+                        .foregroundColor(.white)
+                        .padding(12)
+                        .background(
+                            Circle()
+                                .liquidGlass(intensity: .regular, tint: .white.opacity(0.15), interactive: true)
+                        )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Close")
+                .accessibilityIdentifier("review.live.closeButton")
+
+                Spacer()
+
+                if itemCount > 1 {
+                    HStack(spacing: 6) {
+                        Button(action: onPrevious) {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 12, weight: .bold))
+                                .frame(width: 28, height: 28)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundColor(currentIndex == 0 ? .white.opacity(0.28) : .white)
+                        .disabled(currentIndex == 0)
+                        .accessibilityLabel("Previous review image")
+                        .accessibilityIdentifier("review.live.previousButton")
+
+                        HStack(spacing: 4) {
+                            ForEach(0..<itemCount, id: \.self) { index in
+                                Circle()
+                                    .fill(index == currentIndex ? Color.yellow : Color.white.opacity(0.3))
+                                    .frame(width: 8, height: 8)
+                            }
+                        }
+
+                        Button(action: onNext) {
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 12, weight: .bold))
+                                .frame(width: 28, height: 28)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundColor(currentIndex >= itemCount - 1 ? .white.opacity(0.28) : .white)
+                        .disabled(currentIndex >= itemCount - 1)
+                        .accessibilityLabel("Next review image")
+                        .accessibilityIdentifier("review.live.nextButton")
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(Color.black.opacity(0.6), in: Capsule())
+                }
+
+                if !selectedEVLabel.isEmpty {
+                    Text(selectedEVLabel)
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .foregroundColor(.yellow)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .background(Color.black.opacity(0.6), in: Capsule())
+                        .accessibilityIdentifier("review.live.selectedEV")
+                }
+
+                Spacer()
+
+                Button(action: onToggleMetadata) {
+                    Image(systemName: showMetadata ? "info.circle.fill" : "info.circle")
+                        .font(.system(size: 20, weight: .medium))
+                        .foregroundColor(showMetadata ? .yellow : .white)
+                        .padding(12)
+                        .background(
+                            Circle()
+                                .liquidGlass(intensity: .regular, tint: showMetadata ? .yellow.opacity(0.25) : .white.opacity(0.12), interactive: true)
+                        )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Photo Info")
+                .accessibilityValue(showMetadata ? "Showing" : "Hidden")
+                .accessibilityIdentifier("review.live.metadataToggle")
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 60)
+
+            if let selectedShot {
+                BracketLiveReviewStatusStrip(
+                    positionLabel: "\(currentIndex + 1) of \(itemCount)",
+                    shot: selectedShot
+                )
+            }
+
+            Spacer()
+
+            HStack {
+                Button(action: onToggleRepresentation) {
+                    HStack(spacing: 8) {
+                        Text(representationTitle)
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(.white)
+                        Image(systemName: representationIcon)
+                            .font(.system(size: 16))
+                            .foregroundColor(.white)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(
+                        Capsule()
+                            .liquidGlass(intensity: .regular, tint: .white.opacity(0.12), interactive: true)
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Review representation")
+                .accessibilityValue(representationAccessibilityValue)
+                .accessibilityIdentifier("review.live.representationToggle")
+
+                Spacer()
+
+                HStack(spacing: 16) {
+                    if let manifestJSON {
+                        ShareLink(item: manifestJSON) {
+                            Image(systemName: "doc.plaintext")
+                                .font(.system(size: 20, weight: .medium))
+                                .foregroundColor(.white)
+                                .padding(12)
+                                .background(
+                                    Circle()
+                                        .liquidGlass(intensity: .regular, tint: .white.opacity(0.12), interactive: true)
+                                )
+                        }
+                        .accessibilityLabel("Share Bracket Manifest")
+                        .accessibilityValue(manifestJSON)
+                        .accessibilityIdentifier("review.live.manifestShareButton")
+                    }
+
+                    Button(action: onShare) {
+                        Image(systemName: "square.and.arrow.up")
+                            .font(.system(size: 20, weight: .medium))
+                            .foregroundColor(.white)
+                            .padding(12)
+                            .background(
+                                Circle()
+                                    .liquidGlass(intensity: .regular, tint: .white.opacity(0.12), interactive: true)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Share Photo")
+                    .accessibilityIdentifier("review.live.shareButton")
+
+                    Button(action: onDelete) {
+                        Image(systemName: "trash")
+                            .font(.system(size: 20, weight: .medium))
+                            .foregroundColor(.red)
+                            .padding(12)
+                            .background(
+                                Circle()
+                                    .liquidGlass(intensity: .prominent, tint: .red.opacity(0.25), interactive: true)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Delete Photo")
+                    .accessibilityIdentifier("review.live.deleteButton")
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 40)
+        }
+    }
+}
+
+private struct BracketLiveReviewStatusStrip: View {
+    let positionLabel: String
+    let shot: BracketReviewShotSummary
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(positionLabel)
+                .accessibilityIdentifier("review.live.position")
+
+            Text(shot.fileType)
+                .accessibilityIdentifier("review.live.fileType")
+
+            Text(shot.metadataAvailability.displayName)
+                .accessibilityIdentifier("review.live.metadataStatus")
+                .accessibilityValue(shot.metadataAvailability.detail)
+        }
+        .font(.system(size: 11, weight: .bold, design: .rounded))
+        .foregroundColor(.white.opacity(0.76))
+        .lineLimit(1)
+        .minimumScaleFactor(0.75)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.black.opacity(0.42), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .padding(.horizontal, 20)
+        .padding(.top, 8)
+    }
+}
+
+struct DeterministicImageReviewFixtureView: View {
+    let onDismiss: () -> Void
+
+    @State private var sequence = Self.makeSequence()
+    @State private var showMetadata = false
+    @State private var showDeleteConfirmation = false
+    @State private var shareNoticeVisible = false
+    @State private var dismissed = false
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            if dismissed {
+                VStack(spacing: 12) {
+                    Text("Review Fixture Dismissed")
+                        .font(.system(size: 22, weight: .bold, design: .rounded))
+                        .foregroundColor(.white)
+                        .accessibilityIdentifier("review.fixture.dismissedTitle")
+
+                    Button("Reopen") {
+                        dismissed = false
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            } else if sequence.isEmpty {
+                VStack(spacing: 12) {
+                    Text("No Fixture Shots")
+                        .font(.system(size: 22, weight: .bold, design: .rounded))
+                        .foregroundColor(.white)
+                        .accessibilityIdentifier("review.fixture.emptyTitle")
+
+                    Button("Reset Fixture") {
+                        sequence = Self.makeSequence()
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            } else {
+                fixtureImage
+
+                BracketLiveReviewChrome(
+                    itemCount: sequence.shots.count,
+                    currentIndex: sequence.selectedIndex,
+                    selectedEVLabel: sequence.selectedShot?.displayLabel ?? "",
+                    selectedShot: sequence.selectedShot,
+                    showMetadata: showMetadata,
+                    representationTitle: sequence.selectedRepresentation == .processed ? "JPG" : "RAW",
+                    representationIcon: sequence.selectedRepresentation == .processed ? "photo" : "r.square",
+                    representationAccessibilityValue: sequence.selectedRepresentationAvailabilityLabel,
+                    manifestJSON: fixtureManifestJSON,
+                    onDismiss: {
+                        dismissed = true
+                        onDismiss()
+                    },
+                    onPrevious: { sequence = sequence.selectingPrevious() },
+                    onNext: { sequence = sequence.selectingNext() },
+                    onToggleMetadata: { showMetadata.toggle() },
+                    onToggleRepresentation: { sequence = sequence.togglingRepresentation() },
+                    onShare: {
+                        shareNoticeVisible = true
+                    },
+                    onDelete: {
+                        showDeleteConfirmation = true
+                    }
+                )
+
+                if showMetadata, let selectedShot = sequence.selectedShot {
+                    ReviewFixtureProbe(identifier: "review.live.metadataPanel", label: "Live Review Metadata Panel")
+                    fixtureMetadataPanel(for: selectedShot)
+                }
+
+                if shareNoticeVisible {
+                    Text("Fixture export suppressed")
+                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color.black.opacity(0.72), in: Capsule())
+                        .padding(.bottom, 96)
+                        .frame(maxHeight: .infinity, alignment: .bottom)
+                        .accessibilityIdentifier("review.fixture.shareNotice")
+                }
+            }
+        }
+        .confirmationDialog("Remove Fixture Shot?", isPresented: $showDeleteConfirmation, titleVisibility: .visible) {
+            Button("Remove Fixture Shot", role: .destructive) {
+                sequence = sequence.deletingSelected()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes only the in-memory fixture item. No Photos library asset is touched.")
+        }
+    }
+
+    private var fixtureImage: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color(red: 0.04, green: 0.05, blue: 0.08),
+                    Color(red: 0.12, green: 0.18, blue: 0.24),
+                    Color(red: 0.02, green: 0.03, blue: 0.04)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+
+            VStack(spacing: 14) {
+                Text("Deterministic Review Fixture")
+                    .font(.system(size: 24, weight: .bold, design: .rounded))
+                    .foregroundColor(.white)
+                    .accessibilityIdentifier("review.fixture.title")
+
+                if let selectedShot = sequence.selectedShot {
+                    Text(selectedShot.selectedTitle)
+                        .font(.system(size: 15, weight: .semibold, design: .monospaced))
+                        .foregroundColor(.yellow)
+                        .accessibilityIdentifier("review.fixture.selectedTitle")
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("review.fixture.image")
+    }
+
+    private func fixtureMetadataPanel(for shot: BracketReviewShotSummary) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Fixture Metadata", systemImage: "info.circle.fill")
+                .font(.system(size: 15, weight: .bold, design: .rounded))
+                .foregroundColor(.yellow)
+
+            Text(shot.metadataAvailability.detail)
+                .font(.system(size: 13, weight: .medium, design: .rounded))
+                .foregroundColor(.white.opacity(0.74))
+                .accessibilityIdentifier("review.live.metadataDetail")
+
+            Text(shot.clippingSummary)
+                .font(.system(size: 13, weight: .medium, design: .rounded))
+                .foregroundColor(shot.clippingWarnings.isEmpty ? .white.opacity(0.62) : .orange)
+                .accessibilityIdentifier("review.live.clippingSummary")
+        }
+        .padding(14)
+        .background(Color.black.opacity(0.78), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .padding(.horizontal, 20)
+        .padding(.top, 132)
+        .frame(maxHeight: .infinity, alignment: .top)
+    }
+
+    private var fixtureManifestJSON: String? {
+        try? sequence.manifest(
+            groupIdentifier: "review-fixture",
+            source: .photos,
+            plan: Self.fixturePlan
+        ).jsonString()
+    }
+
+    private static let fixturePlan = BracketPlan(evStep: 2.0, requestedShotCount: 5)
+
+    private static func makeSequence() -> BracketReviewSequence {
+        BracketReviewSequence.make(
+            plan: fixturePlan,
+            assetIdentifiers: [
+                "fixture--4.0EV",
+                "fixture--2.0EV",
+                "fixture-0EV",
+                "fixture-+2.0EV",
+                "fixture-+4.0EV",
+            ],
+            capturedAt: Date(timeIntervalSince1970: 0),
+            fileType: "RAW + Processed",
+            metadataAvailability: .available(summary: "18 metadata keys / 4032 x 3024 / ISO 125 / Wide Camera"),
+            availableRepresentations: [.processed, .raw]
+        )
+    }
+}
+
+private struct ReviewFixtureProbe: View {
+    let identifier: String
+    let label: String
+    var value: String?
+
+    var body: some View {
+        Color.clear
+            .frame(width: 1, height: 1)
+            .accessibilityElement()
+            .accessibilityLabel(label)
+            .accessibilityValue(value ?? "")
+            .accessibilityIdentifier(identifier)
+    }
+}
+
+private extension CameraRuntimeDiagnosticEvent.Severity {
+    var loggerLevel: Logger.Level {
+        switch self {
+        case .info:
+            return .info
+        case .warning:
+            return .warning
+        case .error:
+            return .error
         }
     }
 }

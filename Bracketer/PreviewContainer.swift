@@ -52,6 +52,8 @@ struct PreviewContainer: View {
     var levelAngle: Double = 0
     var showHistogram: Bool = false
     var histogramData: HistogramData? = nil
+    var showZebras: Bool = false
+    var frameAnalysis: HistogramFrameAnalysis? = nil
     var focusPeakingEnabled: Bool = false
     var focusPeakingColor: Color = .red
     var focusPeakingIntensity: Float = 0.5
@@ -101,8 +103,17 @@ struct PreviewContainer: View {
                             .allowsHitTesting(false)
                     }
 
+                    if showZebras {
+                        ZebraOverlay(analysis: frameAnalysis)
+                            .allowsHitTesting(false)
+                    }
+
                     if focusPeakingEnabled {
-                        FocusPeakingOverlay(color: focusPeakingColor, intensity: focusPeakingIntensity)
+                        FocusPeakingOverlay(
+                            color: focusPeakingColor,
+                            intensity: focusPeakingIntensity,
+                            focusPeakingMap: frameAnalysis?.focusPeakingMap
+                        )
                             .allowsHitTesting(false)
                     }
                 }
@@ -321,6 +332,8 @@ struct HistogramOverlay: View {
     var body: some View {
         GeometryReader { geo in
             ZStack {
+                HistogramOverlayProbe(modeTitle: modeTitle)
+
                 // Semi-transparent background
                 Color.black.opacity(isExpanded ? 0.8 : 0.3)
                     .cornerRadius(12)
@@ -441,11 +454,114 @@ struct HistogramOverlay: View {
     }
 }
 
-struct HistogramData {
+private struct HistogramOverlayProbe: View {
+    let modeTitle: String
+
+    var body: some View {
+        Color.clear
+            .frame(width: 1, height: 1)
+            .accessibilityElement()
+            .accessibilityLabel("Histogram Overlay")
+            .accessibilityValue(modeTitle)
+            .accessibilityIdentifier("camera.histogramOverlay")
+    }
+}
+
+private struct ZebraOverlay: View {
+    let analysis: HistogramFrameAnalysis?
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack {
+                ZebraOverlayProbe(summary: summary)
+
+                if let analysis {
+                    ForEach(analysis.zebraMap.regions, id: \.tileIndex) { region in
+                        ZebraRegionPatch(region: region)
+                            .frame(
+                                width: geo.size.width * CGFloat(region.width),
+                                height: geo.size.height * CGFloat(region.height)
+                            )
+                            .position(
+                                x: geo.size.width * CGFloat(region.x + region.width / 2),
+                                y: geo.size.height * CGFloat(region.y + region.height / 2)
+                            )
+                    }
+                }
+            }
+        }
+    }
+
+    private var summary: String {
+        guard let analysis else { return "Waiting for analysis" }
+        return "Highlights \(percent(analysis.clipping.highlightClippedFraction)), Shadows \(percent(analysis.clipping.shadowClippedFraction)), Regions \(analysis.zebraMap.regions.count)"
+    }
+
+    private func percent(_ value: Float) -> String {
+        "\(Int((value * 100).rounded()))%"
+    }
+}
+
+private struct ZebraOverlayProbe: View {
+    let summary: String
+
+    var body: some View {
+        Color.clear
+            .frame(width: 1, height: 1)
+            .accessibilityElement()
+            .accessibilityLabel("Zebra Overlay")
+            .accessibilityValue(summary)
+            .accessibilityIdentifier("camera.zebraOverlay")
+    }
+}
+
+private struct ZebraRegionPatch: View {
+    let region: ExposureZebraRegion
+
+    var body: some View {
+        ZStack {
+            Rectangle()
+                .fill(color.opacity(0.12 + Double(region.strength) * 0.18))
+            ZebraStripePattern()
+                .stroke(color.opacity(0.65 + Double(region.strength) * 0.25), lineWidth: 1.5)
+        }
+        .blendMode(.screen)
+    }
+
+    private var color: Color {
+        switch region.classification {
+        case .normal:
+            return .clear
+        case .shadowClipped:
+            return .blue
+        case .highlightClipped:
+            return .yellow
+        }
+    }
+}
+
+private struct ZebraStripePattern: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let spacing: CGFloat = 8
+        var x = -rect.height
+
+        while x < rect.width + rect.height {
+            path.move(to: CGPoint(x: x, y: rect.maxY))
+            path.addLine(to: CGPoint(x: x + rect.height, y: rect.minY))
+            x += spacing
+        }
+
+        return path
+    }
+}
+
+struct HistogramData: Equatable, Sendable {
     let red: [Float]
     let green: [Float]
     let blue: [Float]
     let luminance: [Float]
+    let clipping: ExposureClippingMetrics?
 
     // Computed properties for analysis
     var redPeak: Float { red.max() ?? 0 }
@@ -454,17 +570,32 @@ struct HistogramData {
     var luminancePeak: Float { luminance.max() ?? 0 }
 
     var overexposedPixels: Float {
-        let threshold: Float = 0.95
-        return zip(zip(red, green), blue)
-            .filter { $0.0 > threshold || $0.1 > threshold || $1 > threshold }
-            .count > 0 ? 1.0 : 0.0
+        clipping?.highlightClippedFraction ?? clippingSignal(in: 250...255)
     }
 
     var underexposedPixels: Float {
-        let threshold: Float = 0.05
-        return zip(zip(red, green), blue)
-            .filter { $0.0 < threshold && $0.1 < threshold && $1 < threshold }
-            .count > 0 ? 1.0 : 0.0
+        clipping?.shadowClippedFraction ?? clippingSignal(in: 0...5)
+    }
+
+    init(
+        red: [Float],
+        green: [Float],
+        blue: [Float],
+        luminance: [Float],
+        clipping: ExposureClippingMetrics? = nil
+    ) {
+        self.red = red
+        self.green = green
+        self.blue = blue
+        self.luminance = luminance
+        self.clipping = clipping
+    }
+
+    private func clippingSignal(in range: ClosedRange<Int>) -> Float {
+        guard luminance.count == 256 else { return 0 }
+        return range.contains(where: { index in
+            luminance[index] > 0
+        }) ? 1 : 0
     }
 }
 
@@ -644,13 +775,10 @@ struct RGBWaveformView: View {
 struct FocusPeakingOverlay: View {
     let color: Color
     let intensity: Float
-
-    // State for animation timing
-    @State private var currentTime: TimeInterval = Date().timeIntervalSince1970
+    let focusPeakingMap: FocusPeakingMap?
 
     // Focus peaking parameters
     private let focusAreas: [(CGPoint, CGFloat)] = [
-        // Simulated focus areas - in real implementation, this would be calculated from camera feed analysis
         (CGPoint(x: 0.3, y: 0.4), 0.8),  // Strong focus area
         (CGPoint(x: 0.7, y: 0.3), 0.6),  // Medium focus area
         (CGPoint(x: 0.5, y: 0.6), 0.9),  // Very strong focus area
@@ -664,45 +792,83 @@ struct FocusPeakingOverlay: View {
     var body: some View {
         GeometryReader { geo in
             ZStack {
-                // Focus peaking highlights - simulating edge detection
-                ForEach(0..<focusAreas.count, id: \.self) { index in
-                    let area = focusAreas[index]
-                    let position = CGPoint(
-                        x: area.0.x * geo.size.width,
-                        y: area.0.y * geo.size.height
-                    )
-                    let strength = area.1 * CGFloat(intensity)
+                FocusPeakingOverlayProbe(summary: summary)
 
-                    // Create focus peaking dots with varying sizes based on focus strength
-                    FocusPeakingDot(
-                        position: position,
-                        strength: strength,
-                        color: color
-                    )
-                }
-
-                // Add some additional dynamic elements for more realistic effect
-                ForEach(0..<8) { index in
-                    let phase = Double(index) * .pi / 4
-                    let animationOffset = sin(currentTime * 2 + phase) * 5
-
-                    Circle()
-                        .fill(color.opacity(0.3 * Double(intensity)))
-                        .frame(width: 3, height: 3)
-                        .position(
-                            x: geo.size.width * 0.5 + cos(currentTime + phase) * 50 + animationOffset,
-                            y: geo.size.height * 0.5 + sin(currentTime + phase) * 50 + animationOffset
+                if let focusPeakingMap, !focusPeakingMap.regions.isEmpty {
+                    ForEach(focusPeakingMap.regions, id: \.tileIndex) { region in
+                        FocusPeakingRegionPatch(
+                            region: region,
+                            color: color,
+                            intensity: intensity
                         )
+                        .frame(
+                            width: geo.size.width * CGFloat(region.width),
+                            height: geo.size.height * CGFloat(region.height)
+                        )
+                        .position(
+                            x: geo.size.width * CGFloat(region.x + region.width / 2),
+                            y: geo.size.height * CGFloat(region.y + region.height / 2)
+                        )
+                    }
+                } else {
+                    ForEach(0..<focusAreas.count, id: \.self) { index in
+                        let area = focusAreas[index]
+                        let position = CGPoint(
+                            x: area.0.x * geo.size.width,
+                            y: area.0.y * geo.size.height
+                        )
+                        let strength = area.1 * CGFloat(intensity)
+
+                        FocusPeakingDot(
+                            position: position,
+                            strength: strength,
+                            color: color
+                        )
+                    }
                 }
             }
         }
-        .task {
-            // Set up timer to update animation at ~20 FPS for smooth focus peaking animations
-            // Using .task ensures automatic cancellation when the view disappears
-            for await _ in Timer.publish(every: 0.05, on: .main, in: .common).autoconnect().values {
-                currentTime = Date().timeIntervalSince1970
-            }
+    }
+
+    private var summary: String {
+        guard let focusPeakingMap, !focusPeakingMap.regions.isEmpty else {
+            return "Fallback regions \(focusAreas.count)"
         }
+        return "Analysis regions \(focusPeakingMap.regions.count)"
+    }
+}
+
+private struct FocusPeakingOverlayProbe: View {
+    let summary: String
+
+    var body: some View {
+        Color.clear
+            .frame(width: 1, height: 1)
+            .accessibilityElement()
+            .accessibilityLabel("Focus Peaking Overlay")
+            .accessibilityValue(summary)
+            .accessibilityIdentifier("camera.focusPeakingOverlay")
+    }
+}
+
+private struct FocusPeakingRegionPatch: View {
+    let region: FocusPeakingRegion
+    let color: Color
+    let intensity: Float
+
+    var body: some View {
+        let opacity = Double(region.strength * intensity)
+
+        ZStack {
+            Rectangle()
+                .fill(color.opacity(max(0.12, opacity * 0.22)))
+            Rectangle()
+                .stroke(color.opacity(max(0.45, opacity)), lineWidth: 1.5)
+            Circle()
+                .fill(color.opacity(max(0.55, opacity)))
+                .frame(width: 5 + CGFloat(region.strength) * 8, height: 5 + CGFloat(region.strength) * 8)
+        }
+        .blendMode(.screen)
     }
 }
 
@@ -710,9 +876,6 @@ struct FocusPeakingDot: View {
     let position: CGPoint
     let strength: CGFloat
     let color: Color
-
-    // State for animation timing
-    @State private var currentTime: TimeInterval = Date().timeIntervalSince1970
 
     var body: some View {
         ZStack {
@@ -730,20 +893,11 @@ struct FocusPeakingDot: View {
                     .position(position)
             }
 
-            // Pulsing effect for very strong focus
             if strength > 0.8 {
                 Circle()
                     .fill(color.opacity(0.2))
                     .frame(width: 12 + strength * 10, height: 12 + strength * 10)
                     .position(position)
-                    .scaleEffect(1 + sin(currentTime * 3) * 0.1)
-            }
-        }
-        .task {
-            // Set up timer to update pulsing animation at ~20 FPS
-            // Using .task ensures automatic cancellation when the view disappears
-            for await _ in Timer.publish(every: 0.05, on: .main, in: .common).autoconnect().values {
-                currentTime = Date().timeIntervalSince1970
             }
         }
     }

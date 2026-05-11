@@ -43,33 +43,234 @@ enum CameraKind: CaseIterable, Identifiable {
 
 struct CamError: Identifiable {
     let id = UUID()
+    let title: String
     let message: String
+    let actionPath: String?
+    let capabilityIssue: DeviceCapabilityIssue?
     let isRecoverable: Bool
-    init(message: String, isRecoverable: Bool = true) {
+
+    init(
+        title: String = "Error",
+        message: String,
+        actionPath: String? = nil,
+        capabilityIssue: DeviceCapabilityIssue? = nil,
+        isRecoverable: Bool = true
+    ) {
+        self.title = title
         self.message = message
+        self.actionPath = actionPath
+        self.capabilityIssue = capabilityIssue
         self.isRecoverable = isRecoverable
+    }
+
+    init(issue: DeviceCapabilityIssue, isRecoverable: Bool? = nil) {
+        self.init(
+            title: issue.title,
+            message: issue.detail,
+            actionPath: issue.actionPath,
+            capabilityIssue: issue,
+            isRecoverable: isRecoverable ?? (issue.severity == .warning)
+        )
+    }
+
+    var alertMessage: String {
+        guard let actionPath, !actionPath.isEmpty else { return message }
+        return "\(message)\n\nAction: \(actionPath)"
     }
 }
 
-enum BracketSequencePlanner {
-    static func evOffsets(evStep: Float, shotCount: Int, centerBias: Float = 0) -> [Float] {
-        let symmetricOffsets: [Float]
-        switch shotCount {
-        case 3:
-            symmetricOffsets = [-evStep, 0, +evStep]
-        case 5:
-            symmetricOffsets = [-2 * evStep, -evStep, 0, +evStep, +2 * evStep]
-        case 7:
-            symmetricOffsets = [-3 * evStep, -2 * evStep, -evStep, 0, +evStep, +2 * evStep, +3 * evStep]
-        default:
-            symmetricOffsets = [-evStep, 0, +evStep]
+enum CameraRuntimeFailure: Error, Equatable {
+    case cameraPermissionDenied
+    case photosAddPermissionDenied
+    case backCameraUnavailable
+    case cameraSessionFailed(reason: String)
+    case lowStorage(freeMB: Int64, minimumStorageMB: Int64)
+
+    var capabilityIssue: DeviceCapabilityIssue {
+        switch self {
+        case .cameraPermissionDenied:
+            return .cameraAccessDenied()
+        case .photosAddPermissionDenied:
+            return .photosAddAccessDenied()
+        case .backCameraUnavailable:
+            return .cameraUnavailable()
+        case .cameraSessionFailed(let reason):
+            return .cameraSessionFailed(reason: reason)
+        case .lowStorage(let freeMB, let minimumStorageMB):
+            return .lowStorage(freeMB: freeMB, minimumStorageMB: minimumStorageMB)
+        }
+    }
+
+    var camError: CamError {
+        CamError(issue: capabilityIssue, isRecoverable: false)
+    }
+
+    var diagnosticCategory: CameraRuntimeDiagnosticEvent.Category {
+        switch self {
+        case .cameraPermissionDenied, .photosAddPermissionDenied:
+            return .permissions
+        case .backCameraUnavailable, .cameraSessionFailed:
+            return .session
+        case .lowStorage:
+            return .storage
+        }
+    }
+}
+
+struct CameraRuntimeDiagnosticEvent: Identifiable, Equatable, Sendable {
+    enum Category: String, Equatable, Sendable {
+        case startup = "Startup"
+        case permissions = "Permissions"
+        case session = "Session"
+        case lens = "Lens"
+        case planning = "Planning"
+        case capture = "Capture"
+        case storage = "Storage"
+        case recovery = "Recovery"
+        case photos = "Photos"
+        case review = "Review"
+        case histogram = "Histogram"
+    }
+
+    enum Severity: String, Equatable, Sendable {
+        case info = "Info"
+        case warning = "Warning"
+        case error = "Error"
+    }
+
+    let id: Int
+    let category: Category
+    let severity: Severity
+    let title: String
+    let detail: String
+    let actionPath: String?
+    let durationMilliseconds: Int?
+    let recordedAt: Date
+
+    var accessibilityValue: String {
+        var parts = ["\(severity.rawValue)", "\(category.rawValue)", title, detail]
+        if let actionPath, !actionPath.isEmpty {
+            parts.append("Action: \(actionPath)")
+        }
+        if let durationMilliseconds {
+            parts.append("Duration: \(durationMilliseconds) ms")
+        }
+        return parts.joined(separator: " | ")
+    }
+
+    var exportLine: String {
+        var parts = [
+            "Event \(id)",
+            Self.exportTimestamp(for: recordedAt),
+            severity.rawValue,
+            category.rawValue,
+            title,
+            detail
+        ]
+        if let actionPath, !actionPath.isEmpty {
+            parts.append("Action: \(actionPath)")
+        }
+        if let durationMilliseconds {
+            parts.append("Duration: \(durationMilliseconds) ms")
+        }
+        return parts.joined(separator: " | ")
+    }
+
+    private static func exportTimestamp(for date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.string(from: date)
+    }
+}
+
+struct CameraRuntimeDiagnostics: Equatable, Sendable {
+    private(set) var events: [CameraRuntimeDiagnosticEvent]
+    let maxEvents: Int
+
+    init(events: [CameraRuntimeDiagnosticEvent] = [], maxEvents: Int = 30) {
+        self.events = Array(events.suffix(maxEvents))
+        self.maxEvents = maxEvents
+    }
+
+    var latest: CameraRuntimeDiagnosticEvent? {
+        events.last
+    }
+
+    var summaryAccessibilityValue: String {
+        guard let latest else { return "0 events | No diagnostics" }
+        return "\(events.count) events | Latest: \(latest.severity.rawValue) \(latest.category.rawValue) | \(latest.title)"
+    }
+
+    var latestAccessibilityValue: String {
+        latest?.accessibilityValue ?? "No diagnostics"
+    }
+
+    var exportText: String {
+        var lines = [
+            "Bracketer Diagnostics",
+            "Events: \(events.count)",
+            "Max Events: \(maxEvents)"
+        ]
+
+        guard !events.isEmpty else {
+            lines.append("No diagnostics recorded.")
+            return lines.joined(separator: "\n")
         }
 
-        guard centerBias != 0 else {
-            return symmetricOffsets
-        }
+        lines.append(contentsOf: events.map(\.exportLine))
+        return lines.joined(separator: "\n")
+    }
 
-        return symmetricOffsets.map { $0 + centerBias }
+    func recording(
+        category: CameraRuntimeDiagnosticEvent.Category,
+        severity: CameraRuntimeDiagnosticEvent.Severity,
+        title: String,
+        detail: String,
+        actionPath: String? = nil,
+        durationMilliseconds: Int? = nil,
+        recordedAt: Date = Date()
+    ) -> CameraRuntimeDiagnostics {
+        let nextID = (events.last?.id ?? 0) + 1
+        let event = CameraRuntimeDiagnosticEvent(
+            id: nextID,
+            category: category,
+            severity: severity,
+            title: title,
+            detail: detail,
+            actionPath: actionPath,
+            durationMilliseconds: durationMilliseconds,
+            recordedAt: recordedAt
+        )
+        return CameraRuntimeDiagnostics(events: events + [event], maxEvents: maxEvents)
+    }
+
+    func recording(
+        issue: DeviceCapabilityIssue,
+        category: CameraRuntimeDiagnosticEvent.Category,
+        recordedAt: Date = Date()
+    ) -> CameraRuntimeDiagnostics {
+        recording(
+            category: category,
+            severity: issue.severity == .blocker ? .error : .warning,
+            title: issue.title,
+            detail: issue.detail,
+            actionPath: issue.actionPath,
+            recordedAt: recordedAt
+        )
+    }
+}
+
+enum CameraRuntimePerformanceThresholds {
+    static let photoSaveWarningMilliseconds = 1_500
+    static let reviewImageLoadWarningMilliseconds = 1_000
+    static let reviewMetadataLoadWarningMilliseconds = 1_000
+    static let histogramProcessingWarningMilliseconds = 50
+
+    static func severity(
+        durationMilliseconds: Int,
+        warningThresholdMilliseconds: Int
+    ) -> CameraRuntimeDiagnosticEvent.Severity {
+        durationMilliseconds >= warningThresholdMilliseconds ? .warning : .info
     }
 }
 
@@ -164,16 +365,21 @@ struct EffectiveCaptureConfiguration: Equatable {
 
 final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
     @Published var lastError: CamError?
+    @Published private(set) var runtimeDiagnostics = CameraRuntimeDiagnostics()
     @Published var isProRAWEnabled: Bool = false
     @Published var selectedCamera: CameraKind = .wide
     @Published var availableCameraKinds: [CameraKind] = [.wide]
     @Published var isInitializing: Bool = false
+    @Published private(set) var bracketSequenceState: BracketSequenceState = .idle
     @Published var isCapturing: Bool = false
     @Published var captureProgress: Int = 0
     @Published var countdownSecondsRemaining: Int?
     @Published var currentISO: Float = 100.0
     @Published var currentShutterSpeedText: String = "1/60"
     @Published var lastBracketAssets: [PHAsset] = []
+    @Published var lastBracketReviewSequence: BracketReviewSequence?
+    @Published var lastBracketManifest: BracketManifest?
+    @Published var simulatedBracketReview: SimulatedBracketReview?
     @Published var showImageViewer = false
     @Published var currentLensSupportsRaw: Bool = false
 
@@ -187,7 +393,7 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
     @Published var maxWBGain: Float = 4.0
 
     // Bracketing configuration
-    private var plannedEVs: [Float] = []
+    private var activeBracketPlan: BracketPlan?
 
     let session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: Constants.sessionQueueLabel)
@@ -202,7 +408,6 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
     private var baseFocusPosition: Float = 0.0
 
     private var sequenceInFlight: Bool = false
-    private var sequenceEVStep: Float = Constants.defaultEVStep
     private var sequenceStep: Int = 0
     private var sequenceTimestamp: Int?
     private var bracketAssetIds: [String] = []
@@ -216,6 +421,9 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
     private var cancellables = Set<AnyCancellable>()
     private var bracketTimeoutTask: DispatchWorkItem?
     private var countdownTask: Task<Void, Never>?
+    private var simulatedCaptureTask: Task<Void, Never>?
+    private var usesSimulatedCaptureForUITests = false
+    private var activeCaptureStartTime: TimeInterval?
     private var hasResolvedPermissions = false
     private var hasConfiguredSession = false
 
@@ -228,6 +436,13 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
 
     override init() {
         super.init()
+        if ProcessInfo.processInfo.arguments.contains("-ui-testing-simulated-camera") {
+            usesSimulatedCaptureForUITests = true
+            isInitializing = false
+            availableCameraKinds = [.wide]
+            selectedCamera = .wide
+            currentLensSupportsRaw = false
+        }
     }
 
     var isFlashAvailable: Bool {
@@ -250,7 +465,18 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
     deinit {
         exposureUpdateTimer?.invalidate()
         countdownTask?.cancel()
+        simulatedCaptureTask?.cancel()
         cancellables.removeAll()
+    }
+
+    func enableSimulatedCaptureForUITests() {
+        usesSimulatedCaptureForUITests = true
+        main {
+            self.isInitializing = false
+            self.availableCameraKinds = [.wide]
+            self.selectedCamera = .wide
+            self.currentLensSupportsRaw = false
+        }
     }
 
     private func setupOrientationObserver() {
@@ -293,15 +519,33 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
             return
         }
 
+        let startupStart = CACurrentMediaTime()
+        recordDiagnostic(
+            category: .startup,
+            severity: .info,
+            title: "Camera Startup",
+            detail: "Starting camera runtime services."
+        )
         main { self.isInitializing = true }
         do {
+            let permissionsStart = CACurrentMediaTime()
             if !hasResolvedPermissions {
                 try await requestPermissions()
                 hasResolvedPermissions = true
             }
+            recordDiagnostic(
+                category: .permissions,
+                severity: .info,
+                title: "Permissions Ready",
+                detail: "Camera and Photos add permissions are available.",
+                durationMilliseconds: Self.elapsedMilliseconds(since: permissionsStart)
+            )
         } catch {
             main {
-                self.lastError = CamError(message: "Permissions: \(error.localizedDescription)", isRecoverable: false)
+                let startupError = self.camError(for: error)
+                let category = (error as? CameraRuntimeFailure)?.diagnosticCategory ?? .recovery
+                self.recordDiagnostic(for: startupError, category: category)
+                self.lastError = startupError
                 self.isInitializing = false
             }
             return
@@ -318,6 +562,19 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
             if !self.session.isRunning {
                 self.session.startRunning()
                 Logger.cameraSession("started")
+                self.recordDiagnostic(
+                    category: .session,
+                    severity: .info,
+                    title: "Session Running",
+                    detail: "AVCaptureSession started."
+                )
+                self.recordDiagnostic(
+                    category: .startup,
+                    severity: .info,
+                    title: "Camera Startup Complete",
+                    detail: "Camera runtime services are active.",
+                    durationMilliseconds: Self.elapsedMilliseconds(since: startupStart)
+                )
             }
         }
 
@@ -340,12 +597,26 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
         sessionQueue.async { [weak self] in
             guard let self else { return }
 
+            if self.sequenceInFlight {
+                self.finishSequence(
+                    terminalState: .cancelled(plan: self.activeBracketPlan, reason: "Runtime stopped"),
+                    shouldFetchAssets: false,
+                    shouldNotify: false
+                )
+            }
+
             self.histogramProcessor.skipProcessing = true
             self.locationProvider.stop()
 
             if self.session.isRunning {
                 self.session.stopRunning()
                 Logger.cameraSession("stopped")
+                self.recordDiagnostic(
+                    category: .session,
+                    severity: .info,
+                    title: "Session Stopped",
+                    detail: "AVCaptureSession stopped."
+                )
             }
         }
 
@@ -377,12 +648,15 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
 
     private func requestPermissions() async throws {
         let camOK = await AVCaptureDevice.requestAccess(for: .video)
+        Logger.permissionRequest("Camera", granted: camOK)
         guard camOK else {
-            throw NSError(domain: "Bracketer", code: 1, userInfo: [NSLocalizedDescriptionKey: "Camera access denied"])
+            throw CameraRuntimeFailure.cameraPermissionDenied
         }
         let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
-        guard status == .authorized || status == .limited else {
-            throw NSError(domain: "Bracketer", code: 2, userInfo: [NSLocalizedDescriptionKey: "Photo library access denied"])
+        let photosOK = status == .authorized || status == .limited
+        Logger.permissionRequest("Photos Add", granted: photosOK)
+        guard photosOK else {
+            throw CameraRuntimeFailure.photosAddPermissionDenied
         }
         locationProvider.requestWhenInUse()
         notificationAuthorizationGranted = await requestNotificationAuthorization()
@@ -397,6 +671,13 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
     }
 
     private func configureSession(initialKind: CameraKind) async {
+        let configurationStart = CACurrentMediaTime()
+        recordDiagnostic(
+            category: .session,
+            severity: .info,
+            title: "Session Configuration",
+            detail: "Configuring \(initialKind.label) camera session."
+        )
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             sessionQueue.async {
                 self.session.beginConfiguration()
@@ -414,6 +695,13 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
                 self.configureMaxPhotoDimensions()
 
                 self.session.commitConfiguration()
+                self.recordDiagnostic(
+                    category: .session,
+                    severity: .info,
+                    title: "Session Configured",
+                    detail: "Configured \(self.selectedCamera.label) camera session with \(self.availableCameraKinds.count) discovered lens option(s).",
+                    durationMilliseconds: Self.elapsedMilliseconds(since: configurationStart)
+                )
                 cont.resume()
             }
         }
@@ -451,6 +739,11 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
 
     func presentMostRecentAsset() {
         sessionQueue.async {
+            if self.simulatedBracketReview != nil {
+                self.main { self.showImageViewer = true }
+                return
+            }
+
             if !self.lastBracketAssets.isEmpty {
                 self.main { self.showImageViewer = true }
                 return
@@ -465,6 +758,8 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
             }
             self.main {
                 self.lastBracketAssets = [asset]
+                self.lastBracketReviewSequence = nil
+                self.lastBracketManifest = nil
                 self.showImageViewer = true
             }
         }
@@ -525,7 +820,7 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
             position: .back
         )
         guard let dev = discovery.devices.first else {
-            self.postError("Camera not available.")
+            self.postError(.backCameraUnavailable)
             return
         }
         Logger.camera("Selected lens \(kind.label) (\(dev.localizedName)) with \(dev.formats.count) formats")
@@ -535,9 +830,15 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
             if self.session.canAddInput(inp) {
                 self.session.addInput(inp)
                 self.input = inp
+                self.recordDiagnostic(
+                    category: .lens,
+                    severity: .info,
+                    title: "Lens Input Ready",
+                    detail: "\(kind.label) \(dev.localizedName) input added with \(dev.formats.count) format(s)."
+                )
             }
         } catch {
-            self.postError("Camera input error: \(error.localizedDescription)")
+            self.postError(.cameraSessionFailed(reason: error.localizedDescription))
         }
         self.updateDeviceCapabilities()
     }
@@ -785,25 +1086,42 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
         timerMode: TimerMode = .off,
         exposureCompensation: Float = 0
     ) {
-        guard !isCapturing && !sequenceInFlight && countdownTask == nil else { return }
+        guard !bracketSequenceState.isActive && !sequenceInFlight && countdownTask == nil else { return }
+        let plan = BracketPlan(evStep: evStep, requestedShotCount: shotCount, centerBias: exposureCompensation)
+        recordDiagnostic(
+            category: .planning,
+            severity: plan.normalizationReason == nil ? .info : .warning,
+            title: "Bracket Plan",
+            detail: "\(plan.shotCount) shot(s), \(plan.evStep) EV step, center bias \(plan.centerBias)."
+        )
 
-        // Check available storage before starting
-        if !checkAvailableStorage() {
-            postError("Not enough storage space. Free up at least 500 MB to capture bracketed photos.")
+        if let normalizationReason = plan.normalizationReason {
+            postError(normalizationReason)
+        }
+
+        if usesSimulatedCaptureForUITests {
+            beginBracketCapture(
+                plan: plan,
+                flashMode: flashMode,
+                exposureCompensation: exposureCompensation
+            )
+            return
+        }
+
+        if let storageFailure = storagePreflightFailure() {
+            postError(storageFailure)
             return
         }
 
         if timerMode == .off {
             beginBracketCapture(
-                evStep: evStep,
-                shotCount: shotCount,
+                plan: plan,
                 flashMode: flashMode,
                 exposureCompensation: exposureCompensation
             )
         } else {
             startCountdownAndCapture(
-                evStep: evStep,
-                shotCount: shotCount,
+                plan: plan,
                 flashMode: flashMode,
                 timerMode: timerMode,
                 exposureCompensation: exposureCompensation
@@ -812,8 +1130,7 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
     }
 
     private func startCountdownAndCapture(
-        evStep: Float,
-        shotCount: Int,
+        plan: BracketPlan,
         flashMode: FlashMode,
         timerMode: TimerMode,
         exposureCompensation: Float
@@ -821,8 +1138,7 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
         let countdownSeconds = timerMode.seconds
         guard countdownSeconds > 0 else {
             beginBracketCapture(
-                evStep: evStep,
-                shotCount: shotCount,
+                plan: plan,
                 flashMode: flashMode,
                 exposureCompensation: exposureCompensation
             )
@@ -864,8 +1180,7 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
             }
 
             self.beginBracketCapture(
-                evStep: evStep,
-                shotCount: shotCount,
+                plan: plan,
                 flashMode: flashMode,
                 exposureCompensation: exposureCompensation
             )
@@ -873,22 +1188,34 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
     }
 
     private func beginBracketCapture(
-        evStep: Float,
-        shotCount: Int,
+        plan: BracketPlan,
         flashMode: FlashMode,
         exposureCompensation: Float
     ) {
+        if usesSimulatedCaptureForUITests {
+            recordDiagnostic(
+                category: .capture,
+                severity: .info,
+                title: "Simulated Bracket Capture",
+                detail: "Starting deterministic UI-test bracket capture."
+            )
+            beginSimulatedBracketCapture(plan: plan)
+            return
+        }
+
         let resolvedFlashMode = resolveFlashMode(flashMode)
+        setBracketSequenceState(.preparing(plan: plan))
 
         sessionQueue.async {
             guard let dev = self.device else {
-                self.postError("Camera device not available")
+                self.failSequence(plan: plan, message: "Camera device not available")
                 return
             }
 
             self.sequenceInFlight = true
+            self.activeBracketPlan = plan
+            self.activeCaptureStartTime = CACurrentMediaTime()
             self.histogramProcessor.skipProcessing = true
-            self.sequenceEVStep = evStep
             self.sequenceTimestamp = Int(Date().timeIntervalSince1970)
             self.rawPixelFormat = self.chooseRawPixelFormat()
 
@@ -897,14 +1224,14 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
                 self?.orientationManager?.lockOrientation()
             }
 
-            // Build bracket plan based on parameters
-            let evOffsets = self.buildBracketEVOffsets(
-                evStep: evStep,
-                shotCount: shotCount,
-                centerBias: exposureCompensation
+            let evOffsets = plan.evOffsets
+            Logger.camera("Starting bracket capture with \(plan.shotCount) shots at ±\(plan.evStep) EV: \(evOffsets)")
+            self.recordDiagnostic(
+                category: .capture,
+                severity: .info,
+                title: "Bracket Capture Started",
+                detail: "\(plan.shotCount) shot(s) with offsets \(evOffsets)."
             )
-            self.plannedEVs = evOffsets
-            Logger.camera("Starting bracket capture with \(shotCount) shots at ±\(evStep) EV: \(evOffsets)")
 
             // Prepare device for auto exposure to establish baseline
             do {
@@ -923,8 +1250,7 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
                 dev.setExposureTargetBias(clampedBias, completionHandler: nil)
                 dev.unlockForConfiguration()
             } catch {
-                self.postError("Auto baseline failed: \(error.localizedDescription)")
-                self.finishSequence()
+                self.failSequence(plan: plan, message: "Auto baseline failed: \(error.localizedDescription)")
                 return
             }
 
@@ -933,10 +1259,9 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
                 guard let self = self else { return }
                 self.applyRotationAsync()
                 self.main {
-                    self.isCapturing = true
-                    self.captureProgress = 0
                     HapticManager.shared.captureStarted()
                 }
+                self.setBracketSequenceState(.capturing(plan: plan, currentIndex: 0, completedShots: 0))
 
                 // Schedule bracket timeout safety net
                 self.scheduleBracketTimeout()
@@ -1034,10 +1359,6 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
         }
     }
 
-    private func buildBracketEVOffsets(evStep: Float, shotCount: Int, centerBias: Float = 0) -> [Float] {
-        BracketSequencePlanner.evOffsets(evStep: evStep, shotCount: shotCount, centerBias: centerBias)
-    }
-
     private func resolveFlashMode(_ selectedFlashMode: FlashMode) -> AVCaptureDevice.FlashMode {
         guard let device, device.hasFlash else {
             return .off
@@ -1090,37 +1411,125 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
 
     // MARK: - Storage & Timeout Helpers
 
-    private func checkAvailableStorage() -> Bool {
+    private func storagePreflightFailure() -> CameraRuntimeFailure? {
         do {
             let attrs = try FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory())
             if let freeSize = attrs[.systemFreeSize] as? Int64 {
                 let freeMB = freeSize / (1024 * 1024)
                 if freeMB < Constants.minimumStorageMB {
                     Logger.camera("Low storage: \(freeMB) MB available")
-                    return false
+                    return .lowStorage(freeMB: freeMB, minimumStorageMB: Constants.minimumStorageMB)
                 }
             }
         } catch {
             Logger.error("Could not check storage: \(error.localizedDescription)")
         }
-        return true
+        return nil
     }
 
     private func scheduleBracketTimeout() {
         bracketTimeoutTask?.cancel()
         let task = DispatchWorkItem { [weak self] in
             guard let self = self, self.sequenceInFlight else { return }
+            guard let plan = self.activeBracketPlan else {
+                self.finishSequence(terminalState: .failed(plan: nil, message: "Bracket capture timed out without an active plan."), shouldFetchAssets: false, shouldNotify: false)
+                return
+            }
             Logger.error("Bracket capture timed out after \(Constants.bracketTimeoutSeconds)s")
             self.postError("Bracket capture timed out. Please try again.")
-            self.finishSequence()
+            self.finishSequence(terminalState: .timedOut(plan: plan), shouldFetchAssets: false, shouldNotify: false)
         }
         bracketTimeoutTask = task
         sessionQueue.asyncAfter(deadline: .now() + Constants.bracketTimeoutSeconds, execute: task)
     }
 
-    private func finishSequence() {
+    private func beginSimulatedBracketCapture(plan: BracketPlan) {
+        simulatedCaptureTask?.cancel()
+        activeBracketPlan = plan
+        activeCaptureStartTime = CACurrentMediaTime()
+        sequenceInFlight = true
+        simulatedBracketReview = nil
+        lastBracketManifest = nil
+        setBracketSequenceState(.preparing(plan: plan))
+
+        simulatedCaptureTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+
+            for shot in plan.shots {
+                guard !Task.isCancelled else { return }
+                self?.setBracketSequenceState(
+                    .capturing(plan: plan, currentIndex: shot.index, completedShots: shot.index)
+                )
+                try? await Task.sleep(nanoseconds: 350_000_000)
+            }
+
+            guard !Task.isCancelled else { return }
+            self?.setBracketSequenceState(.saving(plan: plan, savedCount: plan.shotCount))
+            try? await Task.sleep(nanoseconds: 250_000_000)
+
+            guard !Task.isCancelled else { return }
+            self?.main {
+                guard let self else { return }
+                let durationMilliseconds = self.activeCaptureStartTime.map(Self.elapsedMilliseconds)
+                let completedState = BracketSequenceState.completed(
+                    plan: plan,
+                    assetIdentifiers: plan.shots.map { "simulated-\($0.filenameLabel)" }
+                )
+                let simulatedReview = SimulatedBracketReview.make(plan: plan)
+                self.simulatedBracketReview = simulatedReview
+                self.lastBracketManifest = simulatedReview.manifest
+                self.sequenceInFlight = false
+                self.sequenceStep = 0
+                self.activeBracketPlan = nil
+                self.activeCaptureStartTime = nil
+                self.simulatedCaptureTask = nil
+                self.setBracketSequenceState(completedState)
+                self.showImageViewer = true
+                self.recordTerminalDiagnostic(
+                    for: completedState,
+                    durationMilliseconds: durationMilliseconds
+                )
+            }
+        }
+    }
+
+    private func failSequence(plan: BracketPlan?, message: String) {
+        postError(message)
+        finishSequence(
+            terminalState: .failed(plan: plan ?? activeBracketPlan, message: message),
+            shouldFetchAssets: false,
+            shouldNotify: false
+        )
+    }
+
+    func cancelBracketCapture(reason: String = "Cancelled by user") {
+        countdownTask?.cancel()
+        countdownTask = nil
+
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            self.finishSequence(
+                terminalState: .cancelled(plan: self.activeBracketPlan, reason: reason),
+                shouldFetchAssets: false,
+                shouldNotify: false
+            )
+        }
+    }
+
+    private func finishSequence(
+        terminalState: BracketSequenceState? = nil,
+        shouldFetchAssets: Bool = true,
+        shouldNotify: Bool = true
+    ) {
+        simulatedCaptureTask?.cancel()
+        simulatedCaptureTask = nil
         bracketTimeoutTask?.cancel()
         bracketTimeoutTask = nil
+        let savedAssetIds = bracketAssetIds
+        let plan = activeBracketPlan
+        let captureDurationMilliseconds = activeCaptureStartTime.map(Self.elapsedMilliseconds)
+        let capturedAt = sequenceTimestamp.map { Date(timeIntervalSince1970: TimeInterval($0)) } ?? Date()
+        let capturedFileType = rawPixelFormat == nil ? "HEIF/JPEG" : "RAW + Processed"
 
         if let dev = self.device {
             do {
@@ -1141,30 +1550,50 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
             }
         }
 
-        self.plannedEVs.removeAll()
-
-        // Fetch the bracketed assets for the image viewer
-        fetchBracketAssets()
+        if shouldFetchAssets {
+            fetchBracketAssets(plan: plan, capturedAt: capturedAt, fileType: capturedFileType)
+        } else {
+            bracketAssetIds.removeAll()
+            main {
+                self.lastBracketReviewSequence = nil
+                self.lastBracketManifest = nil
+            }
+        }
 
         self.sequenceInFlight = false
+        self.sequenceStep = 0
+        self.activeBracketPlan = nil
         self.histogramProcessor.skipProcessing = false
         self.rawPixelFormat = nil
         self.sequenceTimestamp = nil
+        self.activeCaptureStartTime = nil
+
+        let resolvedTerminalState: BracketSequenceState
+        if let terminalState {
+            resolvedTerminalState = terminalState
+        } else if let plan {
+            resolvedTerminalState = .completed(plan: plan, assetIdentifiers: savedAssetIds)
+        } else {
+            resolvedTerminalState = .idle
+        }
+        setBracketSequenceState(resolvedTerminalState)
+        recordTerminalDiagnostic(
+            for: resolvedTerminalState,
+            durationMilliseconds: captureDurationMilliseconds
+        )
 
         Task { @MainActor [weak self] in
             guard let self = self else { return }
-            self.isCapturing = false
-            self.captureProgress = 0
             // Unlock orientation after bracket capture completes
             self.orientationManager?.unlockOrientation()
         }
 
-        if notificationAuthorizationGranted {
+        if notificationAuthorizationGranted && shouldNotify {
             scheduleCaptureCompletionNotification()
         }
     }
 
-    private func fetchBracketAssets() {
+    private func fetchBracketAssets(plan: BracketPlan?, capturedAt: Date, fileType: String) {
         let ids = self.bracketAssetIds
         guard !ids.isEmpty else { return }
 
@@ -1184,6 +1613,26 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
 
         main {
             self.lastBracketAssets = ordered
+            let sequence = plan.map { resolvedPlan in
+                BracketReviewSequence.make(
+                    plan: resolvedPlan,
+                    assetIdentifiers: ordered.map(\.localIdentifier),
+                    capturedAt: capturedAt,
+                    fileType: fileType,
+                    metadataAvailability: .unavailable(reason: "Metadata loads when a photo is selected in review"),
+                    availableRepresentations: fileType.contains("RAW") ? [.processed, .raw] : [.processed]
+                )
+            }
+            self.lastBracketReviewSequence = sequence
+            if let resolvedPlan = plan, let resolvedSequence = sequence {
+                self.lastBracketManifest = resolvedSequence.manifest(
+                    groupIdentifier: ordered.first?.localIdentifier ?? "photos-\(Int(capturedAt.timeIntervalSince1970))",
+                    source: .photos,
+                    plan: resolvedPlan
+                )
+            } else {
+                self.lastBracketManifest = nil
+            }
             self.showImageViewer = true
         }
 
@@ -1205,7 +1654,134 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
     }
 
     private func postError(_ message: String) {
-        main { self.lastError = CamError(message: message) }
+        postError(CamError(message: message))
+    }
+
+    private func postError(_ failure: CameraRuntimeFailure) {
+        postError(failure.camError, category: failure.diagnosticCategory)
+    }
+
+    private func postError(_ error: CamError) {
+        postError(error, category: .recovery)
+    }
+
+    private func postError(
+        _ error: CamError,
+        category: CameraRuntimeDiagnosticEvent.Category
+    ) {
+        recordDiagnostic(for: error, category: category)
+        main { self.lastError = error }
+    }
+
+    private func recordDiagnostic(
+        category: CameraRuntimeDiagnosticEvent.Category,
+        severity: CameraRuntimeDiagnosticEvent.Severity,
+        title: String,
+        detail: String,
+        actionPath: String? = nil,
+        durationMilliseconds: Int? = nil
+    ) {
+        let loggerLevel: Logger.Level
+        switch severity {
+        case .info:
+            loggerLevel = .info
+        case .warning:
+            loggerLevel = .warning
+        case .error:
+            loggerLevel = .error
+        }
+        let durationSuffix = durationMilliseconds.map { " (\($0) ms)" } ?? ""
+        Logger.camera("[\(category.rawValue)] \(title): \(detail)\(durationSuffix)", level: loggerLevel)
+        main {
+            self.runtimeDiagnostics = self.runtimeDiagnostics.recording(
+                category: category,
+                severity: severity,
+                title: title,
+                detail: detail,
+                actionPath: actionPath,
+                durationMilliseconds: durationMilliseconds
+            )
+        }
+    }
+
+    private func recordDiagnostic(
+        issue: DeviceCapabilityIssue,
+        category: CameraRuntimeDiagnosticEvent.Category
+    ) {
+        recordDiagnostic(
+            category: category,
+            severity: issue.severity == .blocker ? .error : .warning,
+            title: issue.title,
+            detail: issue.detail,
+            actionPath: issue.actionPath
+        )
+    }
+
+    private func recordDiagnostic(
+        for error: CamError,
+        category: CameraRuntimeDiagnosticEvent.Category
+    ) {
+        if let issue = error.capabilityIssue {
+            recordDiagnostic(issue: issue, category: category)
+        } else {
+            recordDiagnostic(
+                category: category,
+                severity: error.isRecoverable ? .warning : .error,
+                title: error.title,
+                detail: error.message,
+                actionPath: error.actionPath
+            )
+        }
+    }
+
+    private func camError(for error: Error) -> CamError {
+        if let failure = error as? CameraRuntimeFailure {
+            return failure.camError
+        }
+
+        return CamError(
+            title: "Camera Startup Failed",
+            message: "Bracketer could not start the camera. \(error.localizedDescription)",
+            isRecoverable: false
+        )
+    }
+
+    private func setBracketSequenceState(_ state: BracketSequenceState) {
+        main {
+            self.bracketSequenceState = state
+            self.isCapturing = state.isActive
+            self.captureProgress = state.progress.completedShots
+        }
+    }
+
+    private func recordTerminalDiagnostic(
+        for state: BracketSequenceState,
+        durationMilliseconds: Int? = nil
+    ) {
+        let severity: CameraRuntimeDiagnosticEvent.Severity?
+        switch state.progress.phase {
+        case .completed:
+            severity = .info
+        case .cancelled:
+            severity = .warning
+        case .timedOut, .failed:
+            severity = .error
+        case .idle, .preparing, .capturing, .saving:
+            severity = nil
+        }
+
+        guard let severity else { return }
+        recordDiagnostic(
+            category: .capture,
+            severity: severity,
+            title: state.progress.title,
+            detail: state.progress.subtitle,
+            durationMilliseconds: durationMilliseconds
+        )
+    }
+
+    private static func elapsedMilliseconds(since startTime: TimeInterval) -> Int {
+        max(0, Int(((CACurrentMediaTime() - startTime) * 1_000).rounded()))
     }
 
     @inline(__always) private func main(_ body: @escaping () -> Void) {
@@ -1261,87 +1837,134 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
 extension CameraController: AVCapturePhotoCaptureDelegate {
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
         if let error {
-            postError("Capture error: \(error.localizedDescription)")
+            sessionQueue.async {
+                self.failSequence(plan: self.activeBracketPlan, message: "Capture error: \(error.localizedDescription)")
+            }
             return
         }
-        guard let data = photo.fileDataRepresentation() else { return }
+        guard let data = photo.fileDataRepresentation() else {
+            sessionQueue.async {
+                self.failSequence(plan: self.activeBracketPlan, message: "Capture error: missing photo data.")
+            }
+            return
+        }
         let loc = locationProvider.latestLocation
 
         // For bracketed capture, each photo comes through here
         // Build bracket label for this shot
-        let bracketLabel: String?
+        let plan = activeBracketPlan
         let currentStep = self.sequenceStep
-        if currentStep < self.plannedEVs.count {
-            let ev = self.plannedEVs[currentStep]
-            if ev == 0 {
-                bracketLabel = "0EV"
-            } else if ev > 0 {
-                bracketLabel = "+\(String(format: "%.1f", ev))EV"
-            } else {
-                bracketLabel = "\(String(format: "%.1f", ev))EV"
-            }
+        let bracketLabel: String?
+        if let plan, plan.shots.indices.contains(currentStep) {
+            bracketLabel = plan.shots[currentStep].filenameLabel
         } else {
             bracketLabel = nil
         }
 
         let timestamp = self.sequenceTimestamp ?? Int(Date().timeIntervalSince1970)
-        let totalShots = self.plannedEVs.count
+        let totalShots = plan?.shotCount ?? 0
 
         // Handle both RAW and processed photos
         if photo.isRawPhoto {
-            PhotoSaver.saveRAW(data: data,
-                             suggestedFilename: "Bracket-\(timestamp).dng",
-                             location: loc,
-                             bracketLabel: bracketLabel) { [weak self] assetId in
-                self?.handlePhotoSaved(assetId: assetId, bracketLabel: bracketLabel, currentStep: currentStep, totalShots: totalShots)
+            PhotoSaver.saveRAW(
+                data: data,
+                suggestedFilename: "Bracket-\(timestamp).dng",
+                location: loc,
+                bracketLabel: bracketLabel
+            ) { [weak self] result in
+                self?.handlePhotoSaved(
+                    result: result,
+                    bracketLabel: bracketLabel,
+                    currentStep: currentStep,
+                    totalShots: totalShots
+                )
             }
         } else {
             // Handle processed photos (HEIF/JPEG) when RAW is not available
             let processedFileExtension = self.photoOutput.availablePhotoCodecTypes.contains(.hevc) ? "heic" : "jpg"
-            PhotoSaver.saveProcessed(data: data,
-                                    suggestedFilename: "Bracket-\(timestamp).\(processedFileExtension)",
-                                    location: loc,
-                                    bracketLabel: bracketLabel) { [weak self] assetId in
-                self?.handlePhotoSaved(assetId: assetId, bracketLabel: bracketLabel, currentStep: currentStep, totalShots: totalShots)
+            PhotoSaver.saveProcessed(
+                data: data,
+                suggestedFilename: "Bracket-\(timestamp).\(processedFileExtension)",
+                location: loc,
+                bracketLabel: bracketLabel
+            ) { [weak self] result in
+                self?.handlePhotoSaved(
+                    result: result,
+                    bracketLabel: bracketLabel,
+                    currentStep: currentStep,
+                    totalShots: totalShots
+                )
             }
         }
     }
 
     /// Common handler for photo save completion - updates state on main queue
-    private func handlePhotoSaved(assetId: String?, bracketLabel: String?, currentStep: Int, totalShots: Int) {
+    private func handlePhotoSaved(result: PhotoSaveResult, bracketLabel: String?, currentStep: Int, totalShots: Int) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
+            let plan = self.activeBracketPlan
 
-            if let assetId = assetId {
+            if let assetId = result.assetIdentifier {
                 self.bracketAssetIds.append(assetId)
                 Logger.photo("Saved bracket photo \(currentStep + 1)/\(totalShots): \(bracketLabel ?? "unknown")")
             } else {
                 Logger.photo("Failed to save bracket photo \(currentStep + 1)/\(totalShots)")
             }
+            self.recordPhotoSaveDiagnostic(result: result, currentStep: currentStep, totalShots: totalShots)
 
             // Update progress
             self.sequenceStep += 1
             let progress = min(self.sequenceStep, totalShots)
-            self.captureProgress = progress
+            if let plan {
+                if progress >= totalShots {
+                    self.setBracketSequenceState(.saving(plan: plan, savedCount: self.bracketAssetIds.count))
+                } else {
+                    self.setBracketSequenceState(.capturing(plan: plan, currentIndex: progress, completedShots: progress))
+                }
+            }
             if progress < totalShots {
                 HapticManager.shared.bracketShotCaptured()
             }
         }
     }
 
+    private func recordPhotoSaveDiagnostic(result: PhotoSaveResult, currentStep: Int, totalShots: Int) {
+        let severity: CameraRuntimeDiagnosticEvent.Severity
+        if result.assetIdentifier == nil {
+            severity = .error
+        } else {
+            severity = CameraRuntimePerformanceThresholds.severity(
+                durationMilliseconds: result.durationMilliseconds,
+                warningThresholdMilliseconds: CameraRuntimePerformanceThresholds.photoSaveWarningMilliseconds
+            )
+        }
+
+        recordDiagnostic(
+            category: .photos,
+            severity: severity,
+            title: result.assetIdentifier == nil ? "Photo Save Failed" : "Photo Saved",
+            detail: "Saved shot \(currentStep + 1) of \(totalShots): \(result.filename).",
+            durationMilliseconds: result.durationMilliseconds
+        )
+    }
+
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings, error: Error?) {
         if let error {
-            postError("Finish error: \(error.localizedDescription)")
-            self.finishSequence()
+            sessionQueue.async {
+                self.failSequence(plan: self.activeBracketPlan, message: "Finish error: \(error.localizedDescription)")
+            }
             return
         }
 
         // For bracketed capture, this is called once after all photos complete
-        Logger.camera("Bracket capture completed for sequence with \(self.plannedEVs.count) shots")
+        let totalShots = activeBracketPlan?.shotCount ?? sequenceStep
+        Logger.camera("Bracket capture completed for sequence with \(totalShots) shots")
 
         self.main {
-            self.captureProgress = self.plannedEVs.count
             HapticManager.shared.captureCompleted()
+        }
+        if let plan = activeBracketPlan {
+            setBracketSequenceState(.saving(plan: plan, savedCount: bracketAssetIds.count))
         }
 
         // Finish the sequence
@@ -1351,16 +1974,26 @@ extension CameraController: AVCapturePhotoCaptureDelegate {
     }
 }
 
+struct PhotoSaveResult: Equatable, Sendable {
+    let assetIdentifier: String?
+    let filename: String
+    let durationMilliseconds: Int
+
+    var didSave: Bool {
+        assetIdentifier != nil
+    }
+}
+
 enum PhotoSaver {
     /// Save RAW photo data (DNG format) to Photo Library
-    static func saveRAW(data: Data, suggestedFilename: String, location: CLLocation?, bracketLabel: String? = nil, completion: @escaping (String?) -> Void) {
+    static func saveRAW(data: Data, suggestedFilename: String, location: CLLocation?, bracketLabel: String? = nil, completion: @escaping (PhotoSaveResult) -> Void) {
         let timestamp = extractTimestamp(from: suggestedFilename)
         let filename = bracketLabel.map { "Bracket-\($0)-\(timestamp).dng" } ?? "Bracket-\(timestamp).dng"
         savePhoto(data: data, filename: filename, location: location, completion: completion)
     }
 
     /// Save processed photo data (HEIF/JPEG format) to Photo Library
-    static func saveProcessed(data: Data, suggestedFilename: String, location: CLLocation?, bracketLabel: String? = nil, completion: @escaping (String?) -> Void) {
+    static func saveProcessed(data: Data, suggestedFilename: String, location: CLLocation?, bracketLabel: String? = nil, completion: @escaping (PhotoSaveResult) -> Void) {
         let timestamp = extractTimestamp(from: suggestedFilename)
         let fileExtension = processedFileExtension(for: suggestedFilename)
         let filename = bracketLabel.map { "Bracket-\($0)-\(timestamp).\(fileExtension)" } ?? "Bracket-\(timestamp).\(fileExtension)"
@@ -1391,8 +2024,9 @@ enum PhotoSaver {
     }
 
     /// Common photo save implementation
-    private static func savePhoto(data: Data, filename: String, location: CLLocation?, completion: @escaping (String?) -> Void) {
+    private static func savePhoto(data: Data, filename: String, location: CLLocation?, completion: @escaping (PhotoSaveResult) -> Void) {
         var placeholderIdentifier: String?
+        let saveStart = CACurrentMediaTime()
         PHPhotoLibrary.shared().performChanges({
             let req = PHAssetCreationRequest.forAsset()
             req.location = location
@@ -1407,8 +2041,13 @@ enum PhotoSaver {
             } else {
                 Logger.photo("Saved photo: \(filename)")
             }
+            let result = PhotoSaveResult(
+                assetIdentifier: success ? placeholderIdentifier : nil,
+                filename: filename,
+                durationMilliseconds: max(0, Int(((CACurrentMediaTime() - saveStart) * 1_000).rounded()))
+            )
             DispatchQueue.main.async {
-                completion(success ? placeholderIdentifier : nil)
+                completion(result)
             }
         })
     }

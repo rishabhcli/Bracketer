@@ -26,6 +26,13 @@ struct CameraZoomControl: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
         }
+        .overlay(alignment: .topLeading) {
+            CameraChromeProbe(
+                identifier: "camera.zoomControl",
+                label: "Zoom Selector",
+                value: selectedZoom.displayText
+            )
+        }
     }
 }
 
@@ -58,6 +65,9 @@ struct ZoomLevelButton: View {
         }
         .buttonStyle(.plain)
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isSelected)
+        .accessibilityLabel(level.description)
+        .accessibilityValue(isSelected ? "Selected" : "Not selected")
+        .accessibilityIdentifier("camera.zoom.\(level.accessibilityID)")
     }
 }
 
@@ -101,6 +111,16 @@ enum CameraZoomLevel: Float, CaseIterable, Hashable {
         case .telephoto2x: return .twoX
         case .telephoto4x: return .telephoto
         case .telephoto8x: return .eightX
+        }
+    }
+
+    var accessibilityID: String {
+        switch self {
+        case .ultraWide: return "ultraWide"
+        case .wide: return "wide"
+        case .telephoto2x: return "twoX"
+        case .telephoto4x: return "fourX"
+        case .telephoto8x: return "eightX"
         }
     }
 
@@ -293,6 +313,7 @@ struct FlashModeMenu: View {
             ? "Double-tap to choose flash setting"
             : "Flash is unavailable on the active lens"
         )
+        .accessibilityIdentifier("camera.flashModeButton")
         .disabled(!isAvailable)
     }
 }
@@ -345,6 +366,7 @@ struct TimerModeMenu: View {
         .accessibilityLabel("Timer Mode")
         .accessibilityValue(timerMode.displayName)
         .accessibilityHint("Double-tap to choose timer length")
+        .accessibilityIdentifier("camera.timerModeButton")
     }
 }
 
@@ -422,53 +444,7 @@ struct EnhancedShutterButton: View {
         Button {
             action()
         } label: {
-            ZStack {
-                // Outer ring with glass effect (increased size for better prominence)
-                Circle()
-                    .stroke(lineWidth: 5)
-                    .foregroundColor(.white)
-                    .frame(width: 88, height: 88)
-
-                // Inner button with liquid glass (increased size)
-                Circle()
-                    .fill(.white)
-                    .frame(width: 72, height: 72)
-                    .scaleEffect(isPressed ? 0.85 : (isCapturing ? 0.9 : 1.0))
-                    .overlay(
-                        Circle()
-                            .liquidGlass(
-                                intensity: .prominent,
-                                tint: isCapturing ? .red.opacity(0.5) : nil,
-                                interactive: true
-                            )
-                            .scaleEffect(0.95)
-                    )
-
-                // Progress indicator (increased size)
-                if isCapturing {
-                    Circle()
-                        .trim(from: 0, to: progress)
-                        .stroke(
-                            AngularGradient(
-                                colors: [.yellow, .orange, .yellow],
-                                center: .center
-                            ),
-                            style: StrokeStyle(lineWidth: 6, lineCap: .round)
-                        )
-                        .frame(width: 96, height: 96)
-                        .rotationEffect(.degrees(-90))
-                        .animation(.easeInOut(duration: 0.3), value: progress)
-
-                    // Pulsing effect during capture (increased size)
-                    Circle()
-                        .stroke(lineWidth: 2)
-                        .foregroundColor(.orange.opacity(0.5))
-                        .frame(width: 104, height: 104)
-                        .scaleEffect(isCapturing ? 1.1 : 1.0)
-                        .opacity(isCapturing ? 0.0 : 1.0)
-                        .animation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true), value: isCapturing)
-                }
-            }
+            shutterLabel
         }
         .buttonStyle(ShutterButtonStyle(isPressed: $isPressed))
         .disabled(isCapturing)
@@ -476,6 +452,61 @@ struct EnhancedShutterButton: View {
         .accessibilityValue(isCapturing ? "Capturing" : "Ready")
         .accessibilityIdentifier("camera.shutterButton")
     }
+
+    private var shutterLabel: some View {
+        ZStack {
+            // Outer ring with glass effect (increased size for better prominence)
+            Circle()
+                .stroke(lineWidth: 5)
+                .foregroundColor(.white)
+                .frame(width: 88, height: 88)
+
+            // Inner button with liquid glass (increased size)
+            Circle()
+                .fill(.white)
+                .frame(width: 72, height: 72)
+                .scaleEffect(isPressed ? 0.85 : (isCapturing ? 0.9 : 1.0))
+                .overlay(
+                    Circle()
+                        .liquidGlass(
+                            intensity: .prominent,
+                            tint: isCapturing ? .red.opacity(0.5) : nil,
+                            interactive: true
+                        )
+                        .scaleEffect(0.95)
+                )
+
+            progressIndicator
+        }
+    }
+
+    @ViewBuilder
+    private var progressIndicator: some View {
+        if isCapturing {
+            Circle()
+                .trim(from: 0, to: progress)
+                .stroke(
+                    AngularGradient(
+                        colors: [.yellow, .orange, .yellow],
+                        center: .center
+                    ),
+                    style: StrokeStyle(lineWidth: 6, lineCap: .round)
+                )
+                .frame(width: 96, height: 96)
+                .rotationEffect(.degrees(-90))
+                .animation(.easeInOut(duration: 0.3), value: progress)
+
+            // Pulsing effect during capture (increased size)
+            Circle()
+                .stroke(lineWidth: 2)
+                .foregroundColor(.orange.opacity(0.5))
+                .frame(width: 104, height: 104)
+                .scaleEffect(isCapturing ? 1.1 : 1.0)
+                .opacity(isCapturing ? 0.0 : 1.0)
+                .animation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true), value: isCapturing)
+        }
+    }
+
 }
 
 struct ShutterButtonStyle: ButtonStyle {

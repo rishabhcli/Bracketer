@@ -20,13 +20,35 @@ jobs:
         with:
           xcode-version: latest-stable
 
+      - name: Resolve simulator destination
+        id: destination
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun simctl list devices available
+          udid="$(
+            xcrun simctl list devices available -j |
+            ruby -rjson -e '
+              devices = JSON.parse(STDIN.read).fetch("devices").values.flatten
+              pick = devices.find { |device|
+                device["isAvailable"] && ["iPhone 17 Pro", "iPhone 17"].include?(device["name"])
+              }
+              abort("No available iPhone 17 Pro or iPhone 17 simulator found") unless pick
+              print pick.fetch("udid")
+            '
+          )"
+          echo "destination=platform=iOS Simulator,id=${udid}" >> "$GITHUB_OUTPUT"
+
       - name: Run unit and UI tests
         run: |
+          set -euo pipefail
           mkdir -p build
           xcodebuild test \
             -project Bracketer.xcodeproj \
             -scheme Bracketer \
-            -destination "platform=iOS Simulator,name=iPhone 17 Pro,OS=latest" \
+            -destination "${{ steps.destination.outputs.destination }}" \
+            -parallel-testing-enabled NO \
+            -maximum-concurrent-test-simulator-destinations 1 \
             -resultBundlePath build/Bracketer.xcresult \
             CODE_SIGNING_ALLOWED=NO
 

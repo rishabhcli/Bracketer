@@ -14,6 +14,8 @@ struct ModernProControls: View {
     @Binding var focusPeakingEnabled: Bool
     @Binding var focusPeakingColor: Color
     @Binding var focusPeakingIntensity: Float
+    @Binding var showHistogram: Bool
+    @Binding var showZebras: Bool
     @Binding var bracketShotCount: Int
 
     // Manual controls
@@ -70,6 +72,7 @@ struct ModernProControls: View {
                                 )
                         }
                         .buttonStyle(.plain)
+                        .accessibilityIdentifier("pro.closeButton")
                     }
                     .padding(.horizontal, 28)
                     .padding(.bottom, 6)
@@ -81,6 +84,8 @@ struct ModernProControls: View {
                                 manualISO: $manualISO,
                                 manualShutterSpeed: $manualShutterSpeed,
                                 whiteBalance: $whiteBalance,
+                                showHistogram: $showHistogram,
+                                showZebras: $showZebras,
                                 isExpanded: $isExposureExpanded
                             )
 
@@ -159,6 +164,8 @@ struct ModernExposureControls: View {
     @Binding var manualISO: Float
     @Binding var manualShutterSpeed: Float
     @Binding var whiteBalance: Float
+    @Binding var showHistogram: Bool
+    @Binding var showZebras: Bool
     @Binding var isExpanded: Bool
 
     var body: some View {
@@ -223,6 +230,48 @@ struct ModernExposureControls: View {
                         step: 100,
                         format: { "\(Int($0))K" },
                         color: .orange
+                    )
+
+                    HStack {
+                        Image(systemName: "chart.bar.xaxis")
+                            .foregroundColor(.yellow.opacity(0.9))
+                        Text("Histogram")
+                            .font(.system(size: 16, design: .rounded))
+                            .foregroundColor(.white.opacity(0.9))
+                        Spacer()
+                        Toggle("", isOn: $showHistogram)
+                            .labelsHidden()
+                            .tint(.yellow)
+                            .accessibilityLabel("Histogram Overlay")
+                            .accessibilityValue(showHistogram ? "On" : "Off")
+                            .accessibilityIdentifier("pro.histogramToggle")
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14)
+                            .liquidGlass(intensity: .subtle, tint: .yellow.opacity(0.15), interactive: true)
+                    )
+
+                    HStack {
+                        Image(systemName: "exclamationmark.triangle")
+                            .foregroundColor(.yellow.opacity(0.9))
+                        Text("Zebras")
+                            .font(.system(size: 16, design: .rounded))
+                            .foregroundColor(.white.opacity(0.9))
+                        Spacer()
+                        Toggle("", isOn: $showZebras)
+                            .labelsHidden()
+                            .tint(.yellow)
+                            .accessibilityLabel("Zebra Overlay")
+                            .accessibilityValue(showZebras ? "On" : "Off")
+                            .accessibilityIdentifier("pro.zebraToggle")
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14)
+                            .liquidGlass(intensity: .subtle, tint: .yellow.opacity(0.15), interactive: true)
                     )
                 }
                 .transition(.opacity.combined(with: .move(edge: .top)))
@@ -322,6 +371,9 @@ struct ModernFocusControls: View {
                         Toggle("", isOn: $focusPeakingEnabled)
                             .labelsHidden()
                             .tint(.green)
+                            .accessibilityLabel("Focus Peaking")
+                            .accessibilityValue(focusPeakingEnabled ? "On" : "Off")
+                            .accessibilityIdentifier("pro.focusPeakingToggle")
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 10)
@@ -511,6 +563,7 @@ struct ModernBracketingControls: View {
                                     )
                             }
                             .buttonStyle(.plain)
+                            .accessibilityIdentifier("pro.evStep.\(value)")
                         }
                     }
 
@@ -537,6 +590,7 @@ struct ModernBracketingControls: View {
                                     )
                             }
                             .buttonStyle(.plain)
+                            .accessibilityIdentifier("pro.shotCount.\(count)")
                         }
                     }
                 }
@@ -602,23 +656,27 @@ struct ModernBracketingSequence: View {
     let evStep: Float
     let shotCount: Int
 
+    private var plan: BracketPlan {
+        BracketPlan(evStep: evStep, requestedShotCount: shotCount)
+    }
+
     var body: some View {
         HStack(spacing: 8) {
-            ForEach(generateBracketSequence(), id: \.self) { ev in
+            ForEach(plan.shots) { shot in
                 VStack(spacing: 2) {
-                    Text(formatEV(ev))
+                    Text(formatEV(shot.evOffset))
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(ev == 0 ? .black : .white)
+                        .foregroundColor(shot.isCenterExposure ? .black : .white)
                     Text("EV")
                         .font(.system(size: 9))
-                        .foregroundColor(ev == 0 ? .black.opacity(0.7) : .white.opacity(0.7))
+                        .foregroundColor(shot.isCenterExposure ? .black.opacity(0.7) : .white.opacity(0.7))
                 }
                 .frame(width: 40, height: 30)
                 .background(
                     RoundedRectangle(cornerRadius: 6)
                         .liquidGlass(
-                            intensity: ev == 0 ? .prominent : .subtle,
-                            tint: ev == 0 ? .orange : .white.opacity(0.1),
+                            intensity: shot.isCenterExposure ? .prominent : .subtle,
+                            tint: shot.isCenterExposure ? .orange : .white.opacity(0.1),
                             interactive: false
                         )
                 )
@@ -627,21 +685,8 @@ struct ModernBracketingSequence: View {
         .padding(.vertical, 8)
     }
 
-    private func generateBracketSequence() -> [Float] {
-        switch shotCount {
-        case 3:
-            return [-evStep, 0, +evStep]
-        case 5:
-            return [-2*evStep, -evStep, 0, +evStep, +2*evStep]
-        case 7:
-            return [-3*evStep, -2*evStep, -evStep, 0, +evStep, +2*evStep, +3*evStep]
-        default:
-            return [-evStep, 0, +evStep]
-        }
-    }
-
     private func formatEV(_ value: Float) -> String {
-        if value == 0 {
+        if BracketEVFormatter.isEffectivelyZero(value) {
             return "0"
         } else if value > 0 {
             return "+\(Int(value))"

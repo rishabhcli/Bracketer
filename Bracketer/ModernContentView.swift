@@ -12,7 +12,23 @@ struct ModernContentView: View {
     @StateObject private var orientationManager = OrientationManager()
     @StateObject private var settings = SettingsStore()
 
-    private let disablesStartupSideEffectsForUITests = ProcessInfo.processInfo.arguments.contains("-ui-testing-disable-camera-startup")
+    private let disablesStartupSideEffectsForAutomatedTests =
+        ProcessInfo.processInfo.arguments.contains("-ui-testing-disable-camera-startup")
+        || ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+    private let enablesSimulatedCameraForUITests =
+        ProcessInfo.processInfo.arguments.contains("-ui-testing-simulated-camera")
+    private let enablesReviewFixtureForUITests =
+        ProcessInfo.processInfo.arguments.contains("-ui-testing-review-fixture")
+    private let usesZebraAnalysisFixtureForUITests =
+        ProcessInfo.processInfo.arguments.contains("-ui-testing-show-zebras")
+    private let usesFocusPeakingFixtureForUITests =
+        ProcessInfo.processInfo.arguments.contains("-ui-testing-show-focus-peaking")
+    private var forcedChromeLayoutIsLandscape: Bool? {
+        let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("-ui-testing-force-landscape-layout") { return true }
+        if arguments.contains("-ui-testing-force-portrait-layout") { return false }
+        return nil
+    }
 
     // Transient UI state (not persisted)
     @State private var showProControls = false
@@ -21,16 +37,94 @@ struct ModernContentView: View {
     @State private var selectedZoom: CameraZoomLevel = .wide
     @State private var currentEVCompensation: Float = 0.0
     @State private var evCompensationLocked = false
+    @State private var showHistogram =
+        ProcessInfo.processInfo.arguments.contains("-ui-testing-show-histogram")
+    @State private var showZebras =
+        ProcessInfo.processInfo.arguments.contains("-ui-testing-show-zebras")
 
     // Cancellable task for toast auto-hide
     @State private var toastHideTask: DispatchWorkItem?
+
+    private static let zebraUITestFrameAnalysis: HistogramFrameAnalysis? = {
+        let pixels = [
+            (255, 255, 255), (255, 255, 255), (128, 128, 128), (128, 128, 128),
+            (255, 255, 255), (255, 255, 255), (128, 128, 128), (128, 128, 128),
+            (0, 0, 0), (0, 0, 0), (128, 128, 128), (128, 128, 128),
+            (0, 0, 0), (0, 0, 0), (128, 128, 128), (128, 128, 128),
+        ].reduce(into: [UInt8]()) { bytes, pixel in
+            bytes.append(UInt8(pixel.0))
+            bytes.append(UInt8(pixel.1))
+            bytes.append(UInt8(pixel.2))
+            bytes.append(255)
+        }
+
+        return HistogramFrameAnalyzer.analyzeRGBABytes(
+            pixels,
+            width: 4,
+            height: 4,
+            stepX: 1,
+            stepY: 1,
+            zebraColumns: 4,
+            zebraRows: 4,
+            zebraRegionWarningFraction: 0.5
+        )
+    }()
+
+    private static let focusPeakingUITestFrameAnalysis: HistogramFrameAnalysis? = {
+        let luminanceValues: [UInt8] = [
+            0, 255, 0, 255,
+            255, 0, 255, 0,
+            0, 255, 0, 255,
+            255, 0, 255, 0,
+        ]
+        let pixels = luminanceValues.reduce(into: [UInt8]()) { bytes, value in
+            bytes.append(value)
+            bytes.append(value)
+            bytes.append(value)
+            bytes.append(255)
+        }
+
+        return HistogramFrameAnalyzer.analyzeRGBABytes(
+            pixels,
+            width: 4,
+            height: 4,
+            stepX: 1,
+            stepY: 1,
+            zebraColumns: 4,
+            zebraRows: 4,
+            zebraRegionWarningFraction: 0.5,
+            focusThresholds: FocusPeakingThresholds(edgeThreshold: 20, regionWarningFraction: 0.5)
+        )
+    }()
     
     var body: some View {
         GeometryReader { geometry in
-            let isLandscape = orientationManager.isLandscape
+            let isLandscape = forcedChromeLayoutIsLandscape ?? orientationManager.isLandscape
             let safeTop = geometry.safeAreaInsets.top
             let safeBottom = geometry.safeAreaInsets.bottom
+            let bracketProgress = camera.bracketSequenceState.progress
             ZStack {
+                CameraChromeProbe(
+                    identifier: "camera.chromeLayout",
+                    label: "Camera Chrome Layout",
+                    value: isLandscape ? "Landscape" : "Portrait"
+                )
+                CameraChromeProbe(
+                    identifier: "camera.diagnostics.summary",
+                    label: "Camera Diagnostics Summary",
+                    value: camera.runtimeDiagnostics.summaryAccessibilityValue
+                )
+                CameraChromeProbe(
+                    identifier: "camera.diagnostics.latest",
+                    label: "Camera Latest Diagnostic",
+                    value: camera.runtimeDiagnostics.latestAccessibilityValue
+                )
+                CameraChromeProbe(
+                    identifier: "camera.diagnostics.export",
+                    label: "Camera Diagnostics Export",
+                    value: camera.runtimeDiagnostics.exportText
+                )
+
                 if isLandscape {
                     // In landscape, avoid overlaying controls on top of the preview:
                     // use a vertical stack with top bar, preview, then bottom controls.
@@ -50,17 +144,7 @@ struct ModernContentView: View {
                         .padding(.top, safeTop + 8)
                         .padding(.horizontal, 16)
 
-                        ModernCameraPreview(
-                            camera: camera,
-                            motionManager: motionManager,
-                            orientationManager: orientationManager,
-                            showGrid: settings.showGrid,
-                            gridType: settings.gridType,
-                            showLevel: settings.showLevel,
-                            focusPeakingEnabled: settings.focusPeakingEnabled,
-                            focusPeakingColor: settings.focusPeakingColor,
-                            focusPeakingIntensity: settings.focusPeakingIntensity
-                        )
+                        cameraPreview
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                         ContextualBottomControls(
@@ -90,17 +174,7 @@ struct ModernContentView: View {
                     // Portrait: keep the classic overlay layout (top bar and bottom controls
                     // floating over the preview) for an Apple Camera style look.
                     ZStack {
-                        ModernCameraPreview(
-                            camera: camera,
-                            motionManager: motionManager,
-                            orientationManager: orientationManager,
-                            showGrid: settings.showGrid,
-                            gridType: settings.gridType,
-                            showLevel: settings.showLevel,
-                            focusPeakingEnabled: settings.focusPeakingEnabled,
-                            focusPeakingColor: settings.focusPeakingColor,
-                            focusPeakingIntensity: settings.focusPeakingIntensity
-                        )
+                        cameraPreview
 
                         // Top bar
                         VStack {
@@ -159,6 +233,8 @@ struct ModernContentView: View {
                         focusPeakingEnabled: $settings.focusPeakingEnabled,
                         focusPeakingColor: $settings.focusPeakingColor,
                         focusPeakingIntensity: $settings.focusPeakingIntensity,
+                        showHistogram: $showHistogram,
+                        showZebras: $showZebras,
                         bracketShotCount: $settings.bracketShotCount
                     )
                     .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -187,13 +263,8 @@ struct ModernContentView: View {
                     ModernLoadingOverlay()
                 }
 
-                if camera.isCapturing {
-                    ModernCaptureProgress(
-                        progress: camera.captureProgress,
-                        evStep: settings.selectedEVStep,
-                        totalShots: settings.bracketShotCount,
-                        centerBias: currentEVCompensation
-                    )
+                if bracketProgress.shouldShowOverlay {
+                    ModernCaptureProgress(progress: bracketProgress)
                 }
 
                 if let countdown = camera.countdownSecondsRemaining {
@@ -234,6 +305,12 @@ struct ModernContentView: View {
                     .transition(.move(edge: .top).combined(with: .opacity))
                     .zIndex(99)
                 }
+
+                if enablesReviewFixtureForUITests {
+                    DeterministicImageReviewFixtureView(onDismiss: {})
+                        .zIndex(1_000)
+                }
+
             }
         }
         .ignoresSafeArea()
@@ -265,6 +342,11 @@ struct ModernContentView: View {
         .onChange(of: currentEVCompensation) { _, newValue in
             camera.setExposureCompensation(newValue)
         }
+        .onChange(of: showProControls) { oldValue, newValue in
+            if enablesSimulatedCameraForUITests && oldValue && !newValue {
+                prepareSimulatedReviewFromUITest()
+            }
+        }
         .onChange(of: settings.teleUses12MP) { _, newValue in
             camera.teleUses12MP = newValue
             if camera.selectedCamera == .twoX || camera.selectedCamera == .eightX {
@@ -275,6 +357,14 @@ struct ModernContentView: View {
             // Connect orientation manager to camera
             camera.orientationManager = orientationManager
             camera.teleUses12MP = settings.teleUses12MP
+            if usesFocusPeakingFixtureForUITests {
+                settings.focusPeakingEnabled = true
+                settings.focusPeakingColor = .green
+                settings.focusPeakingIntensity = 0.8
+            }
+            if enablesSimulatedCameraForUITests {
+                camera.enableSimulatedCaptureForUITests()
+            }
             await resumeRuntimeServices()
             // Align the zoom UI with the active logical camera
             selectedZoom = CameraZoomLevel.forCameraKind(camera.selectedCamera)
@@ -301,11 +391,15 @@ struct ModernContentView: View {
             }
         }
         .alert(item: $camera.lastError) { error in
-            Alert(title: Text("Error"), message: Text(error.message), dismissButton: .default(Text("OK")))
+            Alert(title: Text(error.title), message: Text(error.alertMessage), dismissButton: .default(Text("OK")))
         }
         .fullScreenCover(isPresented: $camera.showImageViewer) {
             // If we don't have assets for some reason, present a simple fallback
-            if camera.lastBracketAssets.isEmpty {
+            if let simulatedReview = camera.simulatedBracketReview {
+                SimulatedBracketReviewView(review: simulatedReview) {
+                    camera.showImageViewer = false
+                }
+            } else if camera.lastBracketAssets.isEmpty {
                 ZStack {
                     Color.black.ignoresSafeArea()
                     VStack(spacing: 16) {
@@ -319,7 +413,11 @@ struct ModernContentView: View {
                     }
                 }
             } else {
-                ImageViewer(bracketAssets: camera.lastBracketAssets) {
+                ImageViewer(
+                    bracketAssets: camera.lastBracketAssets,
+                    reviewSequence: camera.lastBracketReviewSequence,
+                    bracketManifest: camera.lastBracketManifest
+                ) {
                     camera.showImageViewer = false
                 }
             }
@@ -337,8 +435,54 @@ struct ModernContentView: View {
         HapticManager.shared.gridTypeChanged()
     }
 
+    @ViewBuilder
+    private var cameraPreview: some View {
+        if enablesSimulatedCameraForUITests {
+            SimulatedCameraPreview(
+                gridType: settings.gridType,
+                showGrid: settings.showGrid
+            )
+        } else {
+            ModernCameraPreview(
+                camera: camera,
+                motionManager: motionManager,
+                orientationManager: orientationManager,
+                showGrid: settings.showGrid,
+                gridType: settings.gridType,
+                showLevel: settings.showLevel,
+                focusPeakingEnabled: settings.focusPeakingEnabled,
+                focusPeakingColor: settings.focusPeakingColor,
+                focusPeakingIntensity: settings.focusPeakingIntensity,
+                showHistogram: showHistogram,
+                showZebras: showZebras,
+                frameAnalysisOverride: uiTestFrameAnalysisOverride
+            )
+        }
+    }
+
+    private var uiTestFrameAnalysisOverride: HistogramFrameAnalysis? {
+        if usesFocusPeakingFixtureForUITests {
+            return Self.focusPeakingUITestFrameAnalysis
+        }
+        if usesZebraAnalysisFixtureForUITests {
+            return Self.zebraUITestFrameAnalysis
+        }
+        return nil
+    }
+
+    private func prepareSimulatedReviewFromUITest() {
+        let plan = BracketPlan(
+            evStep: settings.selectedEVStep,
+            requestedShotCount: settings.bracketShotCount,
+            centerBias: currentEVCompensation
+        )
+        let simulatedReview = SimulatedBracketReview.make(plan: plan)
+        camera.simulatedBracketReview = simulatedReview
+        camera.lastBracketManifest = simulatedReview.manifest
+    }
+
     private func resumeRuntimeServices() async {
-        guard !disablesStartupSideEffectsForUITests else { return }
+        guard !disablesStartupSideEffectsForAutomatedTests else { return }
 
         motionManager.start()
         motionManager.isLevelingActive = settings.showLevel
@@ -347,10 +491,80 @@ struct ModernContentView: View {
     }
 
     private func suspendRuntimeServices() {
-        guard !disablesStartupSideEffectsForUITests else { return }
+        guard !disablesStartupSideEffectsForAutomatedTests else { return }
 
         motionManager.stop()
         camera.stop()
+    }
+}
+
+struct CameraChromeProbe: View {
+    let identifier: String
+    let label: String
+    var value: String?
+
+    var body: some View {
+        Color.clear
+            .frame(width: 1, height: 1)
+            .accessibilityElement()
+            .accessibilityLabel(label)
+            .accessibilityValue(value ?? "")
+            .accessibilityIdentifier(identifier)
+    }
+}
+
+private struct SimulatedCameraPreview: View {
+    let gridType: GridType
+    let showGrid: Bool
+
+    var body: some View {
+        GeometryReader { geo in
+            let previewAspect: CGFloat = 3.0 / 4.0
+
+            ZStack {
+                Color.black.ignoresSafeArea()
+
+                ZStack {
+                    LinearGradient(
+                        colors: [
+                            Color(white: 0.08),
+                            Color(white: 0.16),
+                            Color(white: 0.05)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+
+                    if showGrid {
+                        gridOverlay
+                            .allowsHitTesting(false)
+                    }
+                }
+                .aspectRatio(previewAspect, contentMode: .fit)
+                .frame(maxWidth: geo.size.width, maxHeight: geo.size.height)
+                .clipped()
+            }
+        }
+        .accessibilityIdentifier("camera.simulatedPreview")
+        .allowsHitTesting(false)
+    }
+
+    @ViewBuilder
+    private var gridOverlay: some View {
+        switch gridType {
+        case .ruleOfThirds:
+            RuleOfThirdsGrid()
+                .stroke(Color.white.opacity(0.3), lineWidth: 1)
+        case .goldenRatio:
+            GoldenRatioGrid()
+                .stroke(Color.white.opacity(0.3), lineWidth: 1)
+        case .goldenSpiral:
+            GoldenSpiralGrid()
+                .stroke(Color.white.opacity(0.3), lineWidth: 1)
+        case .centerCrosshair:
+            CenterCrosshairGrid()
+                .stroke(Color.white.opacity(0.3), lineWidth: 1)
+        }
     }
 }
 
@@ -359,14 +573,49 @@ struct ModernCameraPreview: View {
     let camera: CameraController
     @ObservedObject var motionManager: MotionLevelManager
     @ObservedObject var orientationManager: OrientationManager
+    @ObservedObject private var histogramProcessor: HistogramProcessor
     let showGrid: Bool
     let gridType: GridType
     let showLevel: Bool
     let focusPeakingEnabled: Bool
     let focusPeakingColor: Color
     let focusPeakingIntensity: Float
+    let showHistogram: Bool
+    let showZebras: Bool
+    let frameAnalysisOverride: HistogramFrameAnalysis?
+
+    init(
+        camera: CameraController,
+        motionManager: MotionLevelManager,
+        orientationManager: OrientationManager,
+        showGrid: Bool,
+        gridType: GridType,
+        showLevel: Bool,
+        focusPeakingEnabled: Bool,
+        focusPeakingColor: Color,
+        focusPeakingIntensity: Float,
+        showHistogram: Bool,
+        showZebras: Bool,
+        frameAnalysisOverride: HistogramFrameAnalysis? = nil
+    ) {
+        self.camera = camera
+        _motionManager = ObservedObject(wrappedValue: motionManager)
+        _orientationManager = ObservedObject(wrappedValue: orientationManager)
+        _histogramProcessor = ObservedObject(wrappedValue: camera.histogramProcessor)
+        self.showGrid = showGrid
+        self.gridType = gridType
+        self.showLevel = showLevel
+        self.focusPeakingEnabled = focusPeakingEnabled
+        self.focusPeakingColor = focusPeakingColor
+        self.focusPeakingIntensity = focusPeakingIntensity
+        self.showHistogram = showHistogram
+        self.showZebras = showZebras
+        self.frameAnalysisOverride = frameAnalysisOverride
+    }
 
     var body: some View {
+        let frameAnalysis = frameAnalysisOverride ?? histogramProcessor.frameAnalysis
+
         ZStack {
             // Camera preview layer
             PreviewContainer(
@@ -377,174 +626,29 @@ struct ModernCameraPreview: View {
                 gridType: gridType,
                 showGrid: showGrid,
                 levelAngle: showLevel ? motionManager.levelAngleDegrees(for: orientationManager.currentOrientation) : 0,
-                showHistogram: false,
-                histogramData: camera.histogramProcessor.histogramData,
+                showHistogram: showHistogram,
+                histogramData: frameAnalysis?.histogram ?? histogramProcessor.histogramData,
+                showZebras: showZebras,
+                frameAnalysis: frameAnalysis,
                 focusPeakingEnabled: focusPeakingEnabled,
                 focusPeakingColor: focusPeakingColor,
                 focusPeakingIntensity: focusPeakingIntensity
+            )
+            CameraChromeProbe(
+                identifier: "camera.histogramDiagnostics.summary",
+                label: "Histogram Diagnostics Summary",
+                value: histogramProcessor.processingDiagnostics.summaryAccessibilityValue
+            )
+            CameraChromeProbe(
+                identifier: "camera.histogramDiagnostics.latest",
+                label: "Histogram Latest Diagnostic",
+                value: histogramProcessor.processingDiagnostics.latestAccessibilityValue
             )
         }
     }
 }
 
-// MARK: - Modern Top Bar (Apple Camera Style - Status Only)
-struct ModernTopBar: View {
-    let camera: CameraController
-    @Binding var currentShootingMode: ShootingMode
-    let selectedEVStep: Float
-    @Binding var showProControls: Bool
-    @Binding var flashMode: FlashMode
-    @Binding var timerMode: TimerMode
-    let isGridActive: Bool
-    let isLevelActive: Bool
-    let onGridToggle: () -> Void
-    let onLevelToggle: () -> Void
-
-    private var captureConfiguration: EffectiveCaptureConfiguration {
-        camera.effectiveCaptureConfiguration(flashMode: flashMode, timerMode: timerMode)
-    }
-
-    var body: some View {
-        HStack {
-            // Left side - Status indicators only
-            HStack(spacing: ModernDesignSystem.Spacing.sm) {
-                ModernTopBarStatusBadge(
-                    icon: "photo",
-                    label: captureConfiguration.formatBadgeLabel,
-                    tint: camera.isProRAWEnabled ? .yellow : .white.opacity(0.16)
-                )
-
-                ModernTopBarStatusBadge(
-                    icon: captureConfiguration.flashIconName,
-                    label: captureConfiguration.flashBadgeLabel,
-                    tint: flashBadgeTint
-                )
-
-                if let timerBadgeLabel = captureConfiguration.timerBadgeLabel {
-                    ModernTopBarStatusBadge(
-                        icon: "timer",
-                        label: timerBadgeLabel,
-                        tint: .orange.opacity(0.22)
-                    )
-                }
-            }
-
-            Spacer()
-
-            // Center - Mode indicator and bracketing (tappable for mode change)
-            HStack(spacing: ModernDesignSystem.Spacing.sm) {
-                ModernShootingModeIndicator(selectedMode: $currentShootingMode)
-                ModernBracketingIndicator(evStep: selectedEVStep)
-            }
-
-            Spacer()
-
-            // Right side - Pro Controls badge
-            HStack(spacing: ModernDesignSystem.Spacing.sm) {
-                CompactProControlsBadge(showProControls: $showProControls)
-            }
-        }
-        .padding(.horizontal, 20)
-        .padding(.top, 12)
-        .padding(.bottom, 12)
-        .background(.ultraThinMaterial.opacity(0.95))
-    }
-
-    private var flashBadgeTint: Color {
-        guard camera.isFlashAvailable else {
-            return .gray.opacity(0.22)
-        }
-
-        return flashMode == .off ? .white.opacity(0.16) : .yellow.opacity(0.22)
-    }
-}
-
-// MARK: - Modern Bottom Controls (Apple Camera Style)
-struct ModernBottomControls: View {
-    let camera: CameraController
-    @Binding var showProControls: Bool
-    @Binding var showSettings: Bool
-    @Binding var selectedEVStep: Float
-    @Binding var currentEVCompensation: Float
-    @Binding var evCompensationLocked: Bool
-    @Binding var focusPeakingEnabled: Bool
-    @Binding var focusPeakingColor: Color
-    @Binding var focusPeakingIntensity: Float
-    @Binding var bracketShotCount: Int
-    @Binding var flashMode: FlashMode
-    @Binding var timerMode: TimerMode
-    @Binding var isGridActive: Bool
-    @Binding var isLevelActive: Bool
-    let onGridToggle: () -> Void
-    let onLevelToggle: () -> Void
-
-    var body: some View {
-        VStack(spacing: ModernDesignSystem.Spacing.md) {
-            // Secondary controls row (moved from top bar)
-            HStack(spacing: 16) {
-                ModernFlashButton(flashMode: $flashMode, isAvailable: camera.isFlashAvailable)
-                ModernTimerButton(timerMode: $timerMode)
-                ModernToggleButton(
-                    icon: "square.grid.3x3",
-                    isActive: isGridActive,
-                    onTap: onGridToggle
-                )
-                ModernToggleButton(
-                    icon: "level",
-                    isActive: isLevelActive,
-                    onTap: onLevelToggle
-                )
-                ModernProControlButton(showProControls: $showProControls)
-            }
-            .padding(.horizontal, ModernDesignSystem.Spacing.lg)
-
-            // Main control row
-            HStack(spacing: ModernDesignSystem.Spacing.xl) {
-                // Photo library
-                ModernPhotoLibraryButton(camera: camera)
-
-                // Shutter button (larger for better prominence)
-                ModernShutterButton(
-                    isCapturing: camera.isCapturing,
-                    progress: camera.captureProgress,
-                    totalSteps: bracketShotCount
-                ) {
-                    camera.captureLockdownBracket(
-                        evStep: selectedEVStep,
-                        shotCount: bracketShotCount,
-                        flashMode: flashMode,
-                        timerMode: timerMode,
-                        exposureCompensation: currentEVCompensation
-                    )
-                }
-
-                // Settings
-                ModernSettingsButton(showSettings: $showSettings)
-            }
-            .padding(.horizontal, ModernDesignSystem.Spacing.lg)
-            .padding(.bottom, 40)
-        }
-    }
-}
-
 // MARK: - Modern Components
-
-struct ModernFlashButton: View {
-    @Binding var flashMode: FlashMode
-    let isAvailable: Bool
-
-    var body: some View {
-        FlashModeMenu(flashMode: $flashMode, isAvailable: isAvailable, style: .legacy)
-    }
-}
-
-struct ModernTimerButton: View {
-    @Binding var timerMode: TimerMode
-
-    var body: some View {
-        TimerModeMenu(timerMode: $timerMode, style: .legacy)
-    }
-}
 
 struct ModernShootingModeIndicator: View {
     @Binding var selectedMode: ShootingMode
@@ -578,6 +682,7 @@ struct ModernShootingModeIndicator: View {
         .accessibilityLabel("Shooting Mode")
         .accessibilityValue(selectedMode.rawValue)
         .accessibilityHint("Double-tap to choose a mode")
+        .accessibilityIdentifier("camera.shootingModeButton")
     }
 }
 
@@ -598,11 +703,16 @@ struct ModernBracketingIndicator: View {
             Capsule()
                 .liquidGlass(intensity: .regular, tint: .yellow.opacity(0.3), interactive: false)
         )
+        .accessibilityLabel("Bracketing Step")
+        .accessibilityValue("+/-\(String(format: "%.1f", evStep)) EV")
+        .accessibilityIdentifier("camera.bracketingIndicator")
     }
 }
 
 struct ModernToggleButton: View {
     let icon: String
+    let accessibilityID: String
+    let accessibilityLabel: String
     let isActive: Bool
     let onTap: () -> Void
 
@@ -623,7 +733,9 @@ struct ModernToggleButton: View {
             }
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(accessibilityLabel)
         .accessibilityValue(isActive ? "On" : "Off")
+        .accessibilityIdentifier(accessibilityID)
     }
 }
 
@@ -653,6 +765,9 @@ struct ModernProControlButton: View {
             }
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("Pro Controls")
+        .accessibilityValue(showProControls ? "Open" : "Closed")
+        .accessibilityIdentifier("camera.proControlsButton")
     }
 }
 
@@ -676,59 +791,6 @@ struct ModernPhotoLibraryButton: View {
         .buttonStyle(.plain)
         .accessibilityLabel("Photo Library")
         .accessibilityIdentifier("camera.photoLibraryButton")
-    }
-}
-
-struct ModernShutterButton: View {
-    let isCapturing: Bool
-    let progress: Int
-    let totalSteps: Int
-    let action: () -> Void
-
-    var body: some View {
-        Button {
-            HapticManager.shared.shutterPressed()
-            action()
-        } label: {
-            ZStack {
-                // Outer ring with glass effect (increased size)
-                Circle()
-                    .stroke(.white, lineWidth: 5)
-                    .frame(width: 88, height: 88)
-
-                // Inner button with liquid glass (increased size)
-                Circle()
-                    .fill(.ultraThinMaterial)
-                    .opacity(0.9)
-                    .frame(width: 72, height: 72)
-                    .overlay(
-                        Circle()
-                            .fill(isCapturing ? .red.opacity(0.3) : .white.opacity(0.2))
-                    )
-                    .scaleEffect(isCapturing ? 0.9 : 1.0)
-                    .animation(ModernDesignSystem.Animations.spring, value: isCapturing)
-
-                // Progress ring (increased size)
-                if isCapturing {
-                    Circle()
-                        .trim(from: 0, to: CGFloat(progress) / CGFloat(max(1, totalSteps)))
-                        .stroke(
-                            AngularGradient(
-                                colors: [.yellow, .orange, .yellow],
-                                center: .center
-                            ),
-                            lineWidth: 5
-                        )
-                        .frame(width: 96, height: 96)
-                        .rotationEffect(.degrees(-90))
-                }
-            }
-        }
-        .disabled(isCapturing)
-        .scaleEffect(isCapturing ? 0.95 : 1.0)
-        .animation(ModernDesignSystem.Animations.spring, value: isCapturing)
-        .accessibilityLabel("Capture")
-        .accessibilityValue(isCapturing ? "Capturing shot \(progress) of \(totalSteps)" : "Ready")
     }
 }
 
@@ -792,6 +854,9 @@ struct CompactProControlsBadge: View {
             )
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("Pro Controls")
+        .accessibilityValue(showProControls ? "Open" : "Closed")
+        .accessibilityIdentifier("camera.proControlsTopButton")
     }
 }
 
@@ -818,65 +883,26 @@ struct ModernLoadingOverlay: View {
 
 // MARK: - Modern Capture Progress
 struct ModernCaptureProgress: View {
-    let progress: Int
-    let evStep: Float
-    let totalShots: Int
-    let centerBias: Float
-
-    init(progress: Int, evStep: Float, totalShots: Int = 3, centerBias: Float = 0) {
-        self.progress = progress
-        self.evStep = evStep
-        self.totalShots = totalShots
-        self.centerBias = centerBias
-    }
-
-    private var evOffsets: [Float] {
-        BracketSequencePlanner.evOffsets(evStep: evStep, shotCount: totalShots, centerBias: centerBias)
-    }
-
-    private var progressText: String {
-        if progress == 0 {
-            return "Preparing bracket..."
-        } else if progress <= totalShots {
-            let ev = evOffsets[progress - 1]
-            if ev == 0 {
-                return "Capturing 0 EV"
-            } else if ev > 0 {
-                return "Capturing +\(String(format: "%.1f", ev)) EV"
-            } else {
-                return "Capturing \(String(format: "%.1f", ev)) EV"
-            }
-        } else {
-            return "Processing..."
-        }
-    }
-
-    private var progressSubtext: String {
-        if progress == 0 {
-            return "Setting up exposure bracketing"
-        } else if progress <= totalShots {
-            return "Shot \(progress) of \(totalShots)"
-        } else {
-            return "Saving bracketed sequence"
-        }
-    }
+    let progress: BracketCaptureProgress
 
     var body: some View {
         ZStack {
             ModernDesignSystem.Colors.cameraOverlay.ignoresSafeArea()
 
             VStack(spacing: ModernDesignSystem.Spacing.lg) {
-                ProgressView(value: Double(progress), total: Double(totalShots))
+                ProgressView(value: progress.fraction, total: 1)
                     .progressViewStyle(LinearProgressViewStyle(tint: ModernDesignSystem.Colors.cameraControlActive))
                     .frame(width: 200)
 
                 VStack(spacing: ModernDesignSystem.Spacing.xs) {
-                    Text(progressText)
+                    Text(progress.title)
                         .font(ModernDesignSystem.Typography.body)
                         .foregroundColor(ModernDesignSystem.Colors.cameraControl)
-                    Text(progressSubtext)
+                        .accessibilityIdentifier("capture.progress.title")
+                    Text(progress.subtitle)
                         .font(ModernDesignSystem.Typography.caption)
                         .foregroundColor(ModernDesignSystem.Colors.cameraControlSecondary)
+                        .accessibilityIdentifier("capture.progress.subtitle")
                 }
 
                 Text("Keep device steady")
@@ -886,6 +912,7 @@ struct ModernCaptureProgress: View {
             .padding(ModernDesignSystem.Spacing.xl)
             .modernCardStyle(.overlay)
         }
+        .accessibilityIdentifier("capture.progress.overlay")
     }
 }
 
@@ -979,6 +1006,9 @@ struct ModernTopBarEnhanced: View {
         .padding(.top, 12)
         .padding(.bottom, 12)
         .background(.ultraThinMaterial.opacity(0.95))
+        .overlay(alignment: .topLeading) {
+            CameraChromeProbe(identifier: "camera.topBar", label: "Camera Top Bar")
+        }
     }
 
     private var flashBadgeTint: Color {
@@ -987,82 +1017,6 @@ struct ModernTopBarEnhanced: View {
         }
 
         return flashMode == .off ? .white.opacity(0.1) : .yellow.opacity(0.2)
-    }
-}
-
-// MARK: - Enhanced Bottom Controls with iOS 26 Components
-
-@available(iOS 26.0, *)
-struct ModernBottomControlsEnhanced: View {
-    let camera: CameraController
-    @Binding var showProControls: Bool
-    @Binding var showSettings: Bool
-    @Binding var selectedEVStep: Float
-    @Binding var currentEVCompensation: Float
-    @Binding var evCompensationLocked: Bool
-    @Binding var focusPeakingEnabled: Bool
-    @Binding var focusPeakingColor: Color
-    @Binding var focusPeakingIntensity: Float
-    @Binding var bracketShotCount: Int
-    @Binding var selectedZoom: CameraZoomLevel
-    @Binding var flashMode: FlashMode
-    @Binding var timerMode: TimerMode
-    @Binding var isGridActive: Bool
-    @Binding var isLevelActive: Bool
-    let onGridToggle: () -> Void
-    let onLevelToggle: () -> Void
-
-    var body: some View {
-        VStack(spacing: 12) {
-            // Secondary controls row (moved from top bar) - all in thumb reach
-            HStack(spacing: 16) {
-                FlashModeControl(flashMode: $flashMode, isAvailable: camera.isFlashAvailable)
-                TimerModeControl(timerMode: $timerMode)
-                ModernToggleButton(
-                    icon: "square.grid.3x3",
-                    isActive: isGridActive,
-                    onTap: onGridToggle
-                )
-                ModernToggleButton(
-                    icon: "level",
-                    isActive: isLevelActive,
-                    onTap: onLevelToggle
-                )
-                ModernProControlButton(showProControls: $showProControls)
-            }
-            .padding(.horizontal, 20)
-
-            // Main control row with enhanced shutter button
-            HStack(spacing: 40) {
-                // Photo library
-                ModernPhotoLibraryButton(camera: camera)
-
-                // Enhanced shutter button (larger size)
-                EnhancedShutterButton(
-                    isCapturing: camera.isCapturing,
-                    progress: Double(camera.captureProgress) / Double(max(1, bracketShotCount))
-                ) {
-                    camera.captureLockdownBracket(
-                        evStep: selectedEVStep,
-                        shotCount: bracketShotCount,
-                        flashMode: flashMode,
-                        timerMode: timerMode,
-                        exposureCompensation: currentEVCompensation
-                    )
-                }
-
-                // Settings
-                ModernSettingsButton(showSettings: $showSettings)
-            }
-            .padding(.horizontal, 20)
-
-            // Zoom selector at very bottom
-            CameraZoomControl(
-                selectedZoom: $selectedZoom,
-                availableZoomLevels: CameraZoomLevel.iPhone17ProMaxLevels
-            )
-            .padding(.bottom, 40)
-        }
     }
 }
 

@@ -20,7 +20,7 @@ struct BracketerApp: App {
     var body: some Scene {
         WindowGroup {
             if hasCompletedOnboarding || shouldSkipOnboardingForUITests {
-                ModernContentView()
+                DeviceCompatibilityView()
                     .onAppear {
                         // Support all orientations for camera
                         AppDelegate.orientationLock = .all

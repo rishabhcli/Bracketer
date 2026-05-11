@@ -23,6 +23,7 @@ struct ModernSettingsPanel: View {
     private var quickPresetData: [SettingsPresetButtonData] {
         [
             SettingsPresetButtonData(
+                accessibilityID: "landscape",
                 title: "Landscape",
                 subtitle: "Balanced outdoor look",
                 icon: "mountain.2.fill",
@@ -35,6 +36,7 @@ struct ModernSettingsPanel: View {
                 focusPeakingIntensity = 0.4
             },
             SettingsPresetButtonData(
+                accessibilityID: "portrait",
                 title: "Portrait",
                 subtitle: "Mid grid, warm peaking",
                 icon: "person.crop.square",
@@ -48,6 +50,7 @@ struct ModernSettingsPanel: View {
                 focusPeakingIntensity = 0.65
             },
             SettingsPresetButtonData(
+                accessibilityID: "studio",
                 title: "Studio",
                 subtitle: "Minimal UI, strong peaking",
                 icon: "sparkles",
@@ -60,6 +63,7 @@ struct ModernSettingsPanel: View {
                 focusPeakingIntensity = 0.85
             },
             SettingsPresetButtonData(
+                accessibilityID: "tripod",
                 title: "Tripod",
                 subtitle: "Precise leveling + grid",
                 icon: "level",
@@ -102,6 +106,7 @@ struct ModernSettingsPanel: View {
                                 Text("Settings")
                                     .font(ModernDesignSystem.Typography.title2)
                                     .foregroundColor(ModernDesignSystem.Colors.cameraControl)
+                                    .accessibilityIdentifier("settings.title")
                                 Text(selectedCategory.subtitle)
                                     .font(ModernDesignSystem.Typography.caption)
                                     .foregroundColor(ModernDesignSystem.Colors.cameraControlSecondary)
@@ -135,6 +140,7 @@ struct ModernSettingsPanel: View {
                             }
                         }
                         .pickerStyle(.segmented)
+                        .accessibilityIdentifier("settings.categoryPicker")
                         .padding(.horizontal, ModernDesignSystem.Spacing.lg)
 
                         // Settings sections
@@ -166,13 +172,14 @@ struct ModernSettingsPanel: View {
                                             timerMode: timerMode
                                         )
                                     case .about:
-                                        ModernAboutSection()
+                                        ModernAboutSection(diagnosticsReport: camera.runtimeDiagnostics.exportText)
                                     }
                                 }
                             }
                             .padding(.horizontal, ModernDesignSystem.Spacing.lg)
                             .padding(.bottom, ModernDesignSystem.Spacing.xl)
                         }
+                        .accessibilityIdentifier("settings.scrollView")
                     }
                     .frame(maxHeight: geometry.size.height * 0.75)
                     .background(
@@ -209,6 +216,7 @@ struct ModernViewfinderSettings: View {
                 title: "Grid Overlay",
                 subtitle: "Show guides on the preview",
                 tint: ModernDesignSystem.Colors.professional,
+                accessibilityID: "grid",
                 isOn: $showGrid
             )
 
@@ -218,6 +226,7 @@ struct ModernViewfinderSettings: View {
                     icon: "square.grid.3x3",
                     options: GridType.allCases,
                     selection: $gridType,
+                    accessibilityID: "gridStyle",
                     labelProvider: { $0.rawValue }
                 )
                 .padding(.top, ModernDesignSystem.Spacing.sm)
@@ -235,6 +244,7 @@ struct ModernViewfinderSettings: View {
                 title: "Level Indicator",
                 subtitle: "Keep horizons perfectly straight",
                 tint: ModernDesignSystem.Colors.warning,
+                accessibilityID: "level",
                 isOn: $showLevel
             )
         }
@@ -259,6 +269,7 @@ struct ModernFocusSettings: View {
                 title: "Focus Peaking",
                 subtitle: "Highlight crisp edges",
                 tint: ModernDesignSystem.Colors.success,
+                accessibilityID: "focusPeaking",
                 isOn: $focusPeakingEnabled
             )
 
@@ -288,12 +299,14 @@ struct ModernCameraSettings: View {
     private var captureBadges: [ModernSettingBadgeData] {
         [
             ModernSettingBadgeData(
+                accessibilityID: "photoFormat",
                 icon: "photo.on.rectangle",
                 title: "Photo Format",
                 value: captureConfiguration.formatDisplayName,
                 tint: ModernDesignSystem.Colors.cameraControlActive
             ),
             ModernSettingBadgeData(
+                accessibilityID: "flash",
                 icon: "bolt.fill",
                 title: "Flash",
                 value: captureConfiguration.flashDisplayName,
@@ -302,12 +315,14 @@ struct ModernCameraSettings: View {
                     : .gray
             ),
             ModernSettingBadgeData(
+                accessibilityID: "timer",
                 icon: "timer",
                 title: "Timer",
                 value: captureConfiguration.timerDisplayName,
                 tint: timerMode == .off ? .gray : .orange
             ),
             ModernSettingBadgeData(
+                accessibilityID: "location",
                 icon: "location.fill",
                 title: "Location",
                 value: captureConfiguration.locationDisplayName,
@@ -358,6 +373,7 @@ struct ModernCameraSettings: View {
 // MARK: - Modern About Section
 struct ModernAboutSection: View {
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
+    let diagnosticsReport: String
 
     private var versionText: String {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unknown"
@@ -390,9 +406,46 @@ struct ModernAboutSection: View {
                     hasCompletedOnboarding = false
                 }
             )
+#if DEBUG
+            ModernDiagnosticsExportRow(report: diagnosticsReport)
+#endif
         }
     }
 }
+
+#if DEBUG
+private struct ModernDiagnosticsExportRow: View {
+    let report: String
+
+    var body: some View {
+        ShareLink(item: report) {
+            HStack {
+                Image(systemName: "square.and.arrow.up")
+                    .foregroundColor(ModernDesignSystem.Colors.cameraControlSecondary)
+                    .frame(width: 20)
+
+                Text("Export Diagnostics")
+                    .font(ModernDesignSystem.Typography.body)
+                    .foregroundColor(ModernDesignSystem.Colors.cameraControl)
+
+                Spacer()
+
+                Text("Debug")
+                    .font(ModernDesignSystem.Typography.caption)
+                    .foregroundColor(ModernDesignSystem.Colors.cameraControlSecondary)
+            }
+            .padding(.vertical, ModernDesignSystem.Spacing.sm)
+            .padding(.horizontal, ModernDesignSystem.Spacing.md)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .liquidGlass(intensity: .subtle, tint: .white.opacity(0.08), interactive: true)
+            )
+        }
+        .accessibilityIdentifier("settings.diagnostics.shareButton")
+        .accessibilityValue(report)
+    }
+}
+#endif
 
 // MARK: - Modern Setting Row
 struct ModernSettingRow: View {
@@ -461,6 +514,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
 
 struct SettingsPresetButtonData: Identifiable {
     let id = UUID()
+    let accessibilityID: String
     let title: String
     let subtitle: String
     let icon: String
@@ -516,6 +570,8 @@ struct ModernQuickPresetButton: View {
             )
         }
         .buttonStyle(.plain)
+        .accessibilityIdentifier("settings.preset.\(preset.accessibilityID)")
+        .accessibilityValue(preset.title)
     }
 }
 
@@ -570,6 +626,7 @@ struct ModernDropdownPicker<Option: Identifiable & Equatable>: View {
     let icon: String
     let options: [Option]
     @Binding var selection: Option
+    let accessibilityID: String
     let labelProvider: (Option) -> String
 
     var body: some View {
@@ -601,6 +658,7 @@ struct ModernDropdownPicker<Option: Identifiable & Equatable>: View {
                     Text(labelProvider(selection))
                         .font(ModernDesignSystem.Typography.body)
                         .foregroundColor(ModernDesignSystem.Colors.cameraControl)
+                        .accessibilityIdentifier("settings.picker.\(accessibilityID).value")
                     Spacer()
                     Image(systemName: "chevron.down")
                         .font(.system(size: 12, weight: .medium))
@@ -613,6 +671,8 @@ struct ModernDropdownPicker<Option: Identifiable & Equatable>: View {
                         .liquidGlass(intensity: .regular, tint: .white.opacity(0.08), interactive: true)
                 )
             }
+            .accessibilityIdentifier("settings.picker.\(accessibilityID)")
+            .accessibilityValue(labelProvider(selection))
         }
     }
 }
@@ -622,6 +682,7 @@ struct ModernToggleRow: View {
     let title: String
     let subtitle: String?
     let tint: Color
+    let accessibilityID: String
     @Binding var isOn: Bool
 
     var body: some View {
@@ -647,6 +708,7 @@ struct ModernToggleRow: View {
             Toggle("", isOn: $isOn)
                 .labelsHidden()
                 .tint(tint)
+                .accessibilityIdentifier("settings.toggle.\(accessibilityID)")
         }
     }
 }
@@ -700,6 +762,8 @@ struct FocusPeakingColorPicker: View {
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(ModernDesignSystem.Colors.cameraControlSecondary)
                 .tracking(0.5)
+                .accessibilityIdentifier("settings.focusPeakingColor.title")
+                .accessibilityValue(colorName(selectedColor))
 
             LazyVGrid(columns: columns, spacing: 12) {
                 ForEach(colors, id: \.self) { color in
@@ -729,8 +793,24 @@ struct FocusPeakingColorPicker: View {
                             )
                     }
                     .buttonStyle(.plain)
+                    .accessibilityIdentifier("settings.focusPeakingColor.\(colorName(color))")
+                    .accessibilityLabel("\(colorName(color).capitalized) Peaking Color")
+                    .accessibilityValue(selectedColor == color ? "Selected" : "Not selected")
                 }
             }
+        }
+    }
+
+    private func colorName(_ color: Color) -> String {
+        switch color {
+        case .red: return "red"
+        case .blue: return "blue"
+        case .yellow: return "yellow"
+        case .green: return "green"
+        case .orange: return "orange"
+        case .purple: return "purple"
+        case .white: return "white"
+        default: return "custom"
         }
     }
 }
@@ -749,6 +829,7 @@ struct FocusPeakingIntensitySlider: View {
                 Text("\(Int(intensity * 100))%")
                     .font(ModernDesignSystem.Typography.monospace)
                     .foregroundColor(ModernDesignSystem.Colors.success)
+                    .accessibilityIdentifier("settings.focusPeakingIntensity.value")
             }
 
             Slider(
@@ -760,6 +841,8 @@ struct FocusPeakingIntensitySlider: View {
                 step: 0.05
             )
             .accentColor(ModernDesignSystem.Colors.success)
+            .accessibilityIdentifier("settings.focusPeakingIntensity.slider")
+            .accessibilityValue("\(Int(intensity * 100))%")
         }
     }
 }
@@ -779,6 +862,7 @@ struct ModernSettingBadgeGrid: View {
 
 struct ModernSettingBadgeData: Identifiable {
     let id = UUID()
+    let accessibilityID: String
     let icon: String
     let title: String
     let value: String
@@ -803,10 +887,12 @@ struct ModernSettingBadge: View {
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(.white.opacity(0.6))
                 .tracking(0.5)
+                .accessibilityIdentifier("settings.badge.\(badge.accessibilityID).title")
 
             Text(badge.value)
                 .font(ModernDesignSystem.Typography.bodyBold)
                 .foregroundColor(.white)
+                .accessibilityIdentifier("settings.badge.\(badge.accessibilityID).value")
         }
         .padding()
         .frame(maxWidth: .infinity, alignment: .leading)
