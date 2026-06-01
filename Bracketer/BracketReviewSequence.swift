@@ -215,6 +215,31 @@ struct BracketReviewSequence: Equatable, Sendable {
         return BracketReviewSequence(shots: summaries)
     }
 
+    static func make(
+        manifest: BracketManifest,
+        selectedIndex: Int = 0
+    ) -> BracketReviewSequence {
+        let summaries = manifest.shots.map { shot in
+            BracketReviewShotSummary(
+                index: shot.index,
+                evOffset: shot.evOffset,
+                assetIdentifier: shot.assetIdentifier,
+                capturedAt: manifest.capturedAt,
+                fileType: shot.fileType,
+                captureState: Self.captureState(displayName: shot.captureState, detail: shot.captureDetail),
+                metadataAvailability: Self.metadataAvailability(
+                    displayName: shot.metadataStatus,
+                    detail: shot.metadataDetail
+                ),
+                availableRepresentations: shot.availableRepresentations.compactMap(Self.representation(displayName:)),
+                isBestExposureCandidate: shot.isBestExposureCandidate,
+                clippingWarnings: shot.clippingWarnings.compactMap(Self.clippingWarning(displayName:))
+            )
+        }
+
+        return BracketReviewSequence(shots: summaries, selectedIndex: selectedIndex)
+    }
+
     var isEmpty: Bool {
         shots.isEmpty
     }
@@ -325,6 +350,44 @@ struct BracketReviewSequence: Equatable, Sendable {
     private static func clamped(index: Int, count: Int) -> Int {
         guard count > 0 else { return 0 }
         return min(max(index, 0), count - 1)
+    }
+
+    private static func captureState(
+        displayName: String,
+        detail: String
+    ) -> BracketReviewCaptureState {
+        if displayName == BracketReviewCaptureState.available.displayName {
+            return .available
+        }
+        if displayName == BracketReviewCaptureState.missing.displayName {
+            return .missing
+        }
+        return .failed(detail)
+    }
+
+    private static func metadataAvailability(
+        displayName: String,
+        detail: String
+    ) -> BracketReviewMetadataAvailability {
+        if displayName == BracketReviewMetadataAvailability.available(summary: detail).displayName {
+            return .available(summary: detail)
+        }
+        return .unavailable(reason: detail)
+    }
+
+    private static func representation(displayName: String) -> BracketReviewRepresentation? {
+        BracketReviewRepresentation.allCases.first { $0.displayName == displayName }
+    }
+
+    private static func clippingWarning(displayName: String) -> BracketReviewClippingWarning? {
+        switch displayName {
+        case BracketReviewClippingWarning.simulatedShadowRisk.displayName:
+            return .simulatedShadowRisk
+        case BracketReviewClippingWarning.simulatedHighlightRisk.displayName:
+            return .simulatedHighlightRisk
+        default:
+            return nil
+        }
     }
 
     private static func simulatedWarnings(for evOffset: Float) -> [BracketReviewClippingWarning] {

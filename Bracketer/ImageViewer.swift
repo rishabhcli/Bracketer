@@ -11,6 +11,9 @@ import QuartzCore
 struct ImageViewer: View {
     let onDismiss: () -> Void
     let bracketManifest: BracketManifest?
+    let intelligenceAvailability: IntelligenceFeatureAvailability
+    let onResourceInspectionUpdate: (BracketProjectResourceInspection.ShotResources) -> Void
+    let onThumbnailInspectionUpdate: (BracketProjectThumbnailInspection.ShotThumbnail) -> Void
     @State private var bracketAssets: [PHAsset]
     @State private var reviewSequence: BracketReviewSequence?
     @State private var currentIndex = 0
@@ -21,6 +24,9 @@ struct ImageViewer: View {
     @State private var currentMetadata: [String: Any]?
     @State private var showDeleteConfirmation = false
     @State private var reviewDiagnostics = CameraRuntimeDiagnostics()
+    @State private var refreshedNarrativeRun: BracketReviewNarrativeRun?
+    @State private var isGeneratingNarrative = false
+    @State private var isNarrativeDismissed = false
 
     private let imageManager = PHCachingImageManager()
 
@@ -28,10 +34,16 @@ struct ImageViewer: View {
         bracketAssets: [PHAsset],
         reviewSequence: BracketReviewSequence? = nil,
         bracketManifest: BracketManifest? = nil,
+        intelligenceAvailability: IntelligenceFeatureAvailability = .simulatorUnsupported,
+        onResourceInspectionUpdate: @escaping (BracketProjectResourceInspection.ShotResources) -> Void = { _ in },
+        onThumbnailInspectionUpdate: @escaping (BracketProjectThumbnailInspection.ShotThumbnail) -> Void = { _ in },
         onDismiss: @escaping () -> Void
     ) {
         self.onDismiss = onDismiss
         self.bracketManifest = bracketManifest
+        self.intelligenceAvailability = intelligenceAvailability
+        self.onResourceInspectionUpdate = onResourceInspectionUpdate
+        self.onThumbnailInspectionUpdate = onThumbnailInspectionUpdate
         _bracketAssets = State(initialValue: bracketAssets)
         _reviewSequence = State(initialValue: reviewSequence)
     }
@@ -116,6 +128,23 @@ struct ImageViewer: View {
                 label: "Review Latest Diagnostic",
                 value: reviewDiagnostics.latestAccessibilityValue
             )
+            ReviewFixtureProbe(
+                identifier: "review.live.manifestRecipe",
+                label: "Live Manifest Recipe",
+                value: manifestRecipeAccessibilityValue
+            )
+
+            if let currentNarrativeRun, !isNarrativeDismissed {
+                BracketReviewNarrativeCard(
+                    run: currentNarrativeRun,
+                    isLoading: isGeneratingNarrative,
+                    onRegenerate: regenerateNarrative,
+                    onDismiss: { isNarrativeDismissed = true }
+                )
+                .padding(.horizontal, 20)
+                .padding(.bottom, 116)
+                .frame(maxHeight: .infinity, alignment: .bottom)
+            }
 
             // EXIF Viewer overlay
             if showMetadata, let metadata = currentMetadata, let image = currentImage {
@@ -152,21 +181,47 @@ struct ImageViewer: View {
         try? bracketManifest?.jsonString()
     }
 
+    private var manifestRecipeAccessibilityValue: String {
+        bracketManifest?.recipe?.accessibilityValue ?? "No applied bracket recipe"
+    }
+
     private var reviewRepresentationAccessibilityValue: String {
         reviewSequence?.selectedRepresentationAvailabilityLabel ?? (showProcessed ? "Processed" : "RAW")
+    }
+
+    private var narrativeRequest: BracketReviewNarrativeRequest? {
+        guard let bracketManifest else { return nil }
+        return BracketReviewNarrativeRequest.make(
+            context: BracketNarrativeContext.make(
+                manifest: bracketManifest,
+                sequence: reviewSequence,
+                intelligenceAvailability: intelligenceAvailability
+            )
+        )
+    }
+
+    private var currentNarrativeRun: BracketReviewNarrativeRun? {
+        if let refreshedNarrativeRun {
+            return refreshedNarrativeRun
+        }
+        guard let narrativeRequest else { return nil }
+        return DeterministicBracketReviewNarrative.run(
+            for: narrativeRequest,
+            fallbackReason: "Not refreshed in this session."
+        )
     }
 
     private func selectImage(at index: Int) {
         guard bracketAssets.indices.contains(index) else { return }
 
         currentIndex = index
-        reviewSequence = reviewSequence?.selecting(index: index)
+        updateReviewSequence(reviewSequence?.selecting(index: index))
         loadImage(at: index)
     }
 
     private func toggleRepresentation() {
         showProcessed.toggle()
-        reviewSequence = reviewSequence?.togglingRepresentation()
+        updateReviewSequence(reviewSequence?.togglingRepresentation())
     }
 
     private func loadImage(at index: Int, forceReload: Bool = false) {
@@ -194,6 +249,17 @@ struct ImageViewer: View {
                                 options: options) { image, info in
             DispatchQueue.main.async {
                 let durationMilliseconds = Self.elapsedMilliseconds(since: loadStart)
+                self.onThumbnailInspectionUpdate(
+                    Self.thumbnailInspection(
+                        from: image,
+                        info: info,
+                        asset: asset,
+                        at: index,
+                        targetSize: targetSize,
+                        deliveryMode: "highQualityFormat",
+                        contentMode: "aspectFit"
+                    )
+                )
                 // Check for errors
                 if let error = info?[PHImageErrorKey] as? Error {
                     Logger.error("Failed to load image: \(error.localizedDescription)")
@@ -294,9 +360,16 @@ struct ImageViewer: View {
 
     private func refreshResourceSummary(for asset: PHAsset, at index: Int) {
         let resources = PHAssetResource.assetResources(for: asset)
-        reviewSequence = reviewSequence?.updatingShot(
+        updateReviewSequence(reviewSequence?.updatingShot(
             at: index,
             resourceSummary: Self.resourceSummary(from: resources)
+        ))
+        onResourceInspectionUpdate(
+            BracketProjectResourceInspection.ShotResources(
+                index: index,
+                assetIdentifier: asset.localIdentifier,
+                resources: resources.map(Self.inspectionResource)
+            )
         )
     }
 
@@ -309,10 +382,28 @@ struct ImageViewer: View {
             return
         }
 
-        reviewSequence = reviewSequence?.updatingShot(
+        updateReviewSequence(reviewSequence?.updatingShot(
             at: currentIndex,
             metadataAvailability: availability
-        )
+        ))
+    }
+
+    private func updateReviewSequence(_ updatedSequence: BracketReviewSequence?) {
+        reviewSequence = updatedSequence
+        refreshedNarrativeRun = nil
+    }
+
+    private func regenerateNarrative() {
+        guard let narrativeRequest else { return }
+        isNarrativeDismissed = false
+        isGeneratingNarrative = true
+        Task {
+            let run = await BracketReviewNarrativeEngine.live.response(for: narrativeRequest)
+            await MainActor.run {
+                refreshedNarrativeRun = run
+                isGeneratingNarrative = false
+            }
+        }
     }
 
     private static func resourceSummary(from resources: [PHAssetResource]) -> BracketReviewResourceSummary {
@@ -388,6 +479,88 @@ struct ImageViewer: View {
 
     private static func fileExtension(for filename: String) -> String {
         URL(fileURLWithPath: filename).pathExtension.lowercased()
+    }
+
+    private static func thumbnailInspection(
+        from image: UIImage?,
+        info: [AnyHashable: Any]?,
+        asset: PHAsset,
+        at index: Int,
+        targetSize: CGSize,
+        deliveryMode: String,
+        contentMode: String
+    ) -> BracketProjectThumbnailInspection.ShotThumbnail {
+        let deliveredPixelWidth = image.map { Int(($0.size.width * $0.scale).rounded()) }
+        let deliveredPixelHeight = image.map { Int(($0.size.height * $0.scale).rounded()) }
+        let error = info?[PHImageErrorKey] as? Error
+        return BracketProjectThumbnailInspection.ShotThumbnail(
+            index: index,
+            assetIdentifier: asset.localIdentifier,
+            targetPixelWidth: Int(targetSize.width.rounded()),
+            targetPixelHeight: Int(targetSize.height.rounded()),
+            deliveredPixelWidth: deliveredPixelWidth,
+            deliveredPixelHeight: deliveredPixelHeight,
+            deliveryMode: deliveryMode,
+            contentMode: contentMode,
+            isDegraded: boolInfo(PHImageResultIsDegradedKey, in: info),
+            isCloudBacked: boolInfo(PHImageResultIsInCloudKey, in: info),
+            wasCancelled: boolInfo(PHImageCancelledKey, in: info),
+            errorDescription: error?.localizedDescription
+        )
+    }
+
+    private static func boolInfo(
+        _ key: String,
+        in info: [AnyHashable: Any]?
+    ) -> Bool {
+        if let value = info?[key] as? Bool {
+            return value
+        }
+        if let value = info?[key] as? NSNumber {
+            return value.boolValue
+        }
+        return false
+    }
+
+    private static func inspectionResource(from resource: PHAssetResource) -> BracketProjectResourceInspection.Resource {
+        BracketProjectResourceInspection.Resource(
+            resourceType: resourceTypeLabel(for: resource.type),
+            originalFilename: resource.originalFilename,
+            uniformTypeIdentifier: resource.uniformTypeIdentifier
+        )
+    }
+
+    private static func resourceTypeLabel(for type: PHAssetResourceType) -> String {
+        switch type {
+        case .photo:
+            return "photo"
+        case .video:
+            return "video"
+        case .audio:
+            return "audio"
+        case .alternatePhoto:
+            return "alternatePhoto"
+        case .fullSizePhoto:
+            return "fullSizePhoto"
+        case .fullSizeVideo:
+            return "fullSizeVideo"
+        case .adjustmentData:
+            return "adjustmentData"
+        case .adjustmentBasePhoto:
+            return "adjustmentBasePhoto"
+        case .pairedVideo:
+            return "pairedVideo"
+        case .fullSizePairedVideo:
+            return "fullSizePairedVideo"
+        case .adjustmentBasePairedVideo:
+            return "adjustmentBasePairedVideo"
+        case .adjustmentBaseVideo:
+            return "adjustmentBaseVideo"
+        case .photoProxy:
+            return "photoProxy"
+        @unknown default:
+            return "unknown-\(type.rawValue)"
+        }
     }
 
     private func recordReviewDiagnostic(
@@ -482,14 +655,14 @@ struct ImageViewer: View {
                     self.showMetadata = false
 
                     if self.bracketAssets.isEmpty {
-                        self.reviewSequence = updatedSequence
+                        self.updateReviewSequence(updatedSequence)
                         self.onDismiss()
                     } else if self.currentIndex >= self.bracketAssets.count {
                         self.currentIndex = max(0, self.currentIndex - 1)
-                        self.reviewSequence = updatedSequence?.selecting(index: self.currentIndex)
+                        self.updateReviewSequence(updatedSequence?.selecting(index: self.currentIndex))
                         self.loadImage(at: self.currentIndex)
                     } else {
-                        self.reviewSequence = updatedSequence?.selecting(index: self.currentIndex)
+                        self.updateReviewSequence(updatedSequence?.selecting(index: self.currentIndex))
                         self.loadImage(at: self.currentIndex)
                     }
                 }

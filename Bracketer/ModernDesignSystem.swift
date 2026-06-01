@@ -98,6 +98,14 @@ struct ModernDesignSystem {
         static let spring = Animation.spring(response: 0.4, dampingFraction: 0.8)
         static let bouncy = Animation.spring(response: 0.3, dampingFraction: 0.6)
         static let gentle = Animation.spring(response: 0.5, dampingFraction: 0.9)
+
+        static func motionAware(_ animation: Animation, reduceMotionEnabled: Bool) -> Animation? {
+            reduceMotionEnabled ? nil : animation
+        }
+
+        static func motionAwareSpring(reduceMotionEnabled: Bool) -> Animation? {
+            motionAware(spring, reduceMotionEnabled: reduceMotionEnabled)
+        }
     }
 }
 

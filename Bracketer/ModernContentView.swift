@@ -7,10 +7,12 @@ import Photos
 
 struct ModernContentView: View {
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @StateObject private var camera = CameraController()
     @StateObject private var motionManager = MotionLevelManager()
     @StateObject private var orientationManager = OrientationManager()
     @StateObject private var settings = SettingsStore()
+    @StateObject private var appIntentRouter = BracketerAppIntentRouter.shared
 
     private let disablesStartupSideEffectsForAutomatedTests =
         ProcessInfo.processInfo.arguments.contains("-ui-testing-disable-camera-startup")
@@ -19,15 +21,53 @@ struct ModernContentView: View {
         ProcessInfo.processInfo.arguments.contains("-ui-testing-simulated-camera")
     private let enablesReviewFixtureForUITests =
         ProcessInfo.processInfo.arguments.contains("-ui-testing-review-fixture")
+    private let opensLatestProjectReviewForUITests =
+        ProcessInfo.processInfo.arguments.contains("-ui-testing-open-latest-project-review")
+    private let opensLatestReviewHandoffForUITests =
+        ProcessInfo.processInfo.arguments.contains("-ui-testing-open-latest-review-handoff")
+    private let opensTimedCaptureHandoffForUITests =
+        ProcessInfo.processInfo.arguments.contains("-ui-testing-open-timed-capture-handoff")
+    private let opensReviewAccessibilityFixtureForUITests =
+        ProcessInfo.processInfo.arguments.contains("-ui-testing-open-review-accessibility-fixture")
     private let usesZebraAnalysisFixtureForUITests =
         ProcessInfo.processInfo.arguments.contains("-ui-testing-show-zebras")
     private let usesFocusPeakingFixtureForUITests =
         ProcessInfo.processInfo.arguments.contains("-ui-testing-show-focus-peaking")
+    private let intelligenceAvailability = IntelligenceAvailabilityService.currentAvailability()
     private var forcedChromeLayoutIsLandscape: Bool? {
         let arguments = ProcessInfo.processInfo.arguments
         if arguments.contains("-ui-testing-force-landscape-layout") { return true }
         if arguments.contains("-ui-testing-force-portrait-layout") { return false }
         return nil
+    }
+
+    private var effectiveAccessibilityReduceMotion: Bool {
+        accessibilityReduceMotion
+            || ProcessInfo.processInfo.arguments.contains("-ui-testing-force-accessibility-environment")
+    }
+
+    private var motionAwareSpring: Animation? {
+        ModernDesignSystem.Animations.motionAwareSpring(reduceMotionEnabled: effectiveAccessibilityReduceMotion)
+    }
+
+    private var bottomSheetTransition: AnyTransition {
+        effectiveAccessibilityReduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity)
+    }
+
+    private var topNotificationTransition: AnyTransition {
+        effectiveAccessibilityReduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity)
+    }
+
+    private static var initialBracketRecipePrompt: String {
+        let arguments = ProcessInfo.processInfo.arguments
+        if let promptIndex = arguments.firstIndex(of: "-ui-testing-bracket-recipe-prompt"),
+           arguments.indices.contains(promptIndex + 1) {
+            return arguments[promptIndex + 1]
+        }
+        if arguments.contains("-ui-testing-bracket-recipe-prompt-high-contrast") {
+            return "High contrast sunset through a bright window"
+        }
+        return ""
     }
 
     // Transient UI state (not persisted)
@@ -41,6 +81,18 @@ struct ModernContentView: View {
         ProcessInfo.processInfo.arguments.contains("-ui-testing-show-histogram")
     @State private var showZebras =
         ProcessInfo.processInfo.arguments.contains("-ui-testing-show-zebras")
+    @State private var refreshedCaptureCoachRun: CaptureCoachRun?
+    @State private var isRefreshingCaptureCoach = false
+    @State private var bracketRecipePrompt = Self.initialBracketRecipePrompt
+    @State private var refreshedBracketRecipeRun: BracketRecipeRun?
+    @State private var isPlanningBracketRecipe = false
+    @State private var activeBracketRecipe: ActiveBracketRecipeSummary?
+    @State private var activeBracketRecipeRecord: AppliedBracketRecipeRecord?
+    @State private var selectedSettingsCategory: SettingsCategory = .viewfinder
+    @State private var handledAppIntentRoutingIdentifier: String?
+    @State private var didOpenProjectReviewForUITest = false
+    @State private var didOpenTimedCaptureHandoffForUITest = false
+    @State private var reviewAccessibilityFixtureSnapshot: BracketProjectReviewSnapshot?
 
     // Cancellable task for toast auto-hide
     @State private var toastHideTask: DispatchWorkItem?
@@ -96,7 +148,7 @@ struct ModernContentView: View {
             focusThresholds: FocusPeakingThresholds(edgeThreshold: 20, regionWarningFraction: 0.5)
         )
     }()
-    
+
     var body: some View {
         GeometryReader { geometry in
             let isLandscape = forcedChromeLayoutIsLandscape ?? orientationManager.isLandscape
@@ -124,6 +176,51 @@ struct ModernContentView: View {
                     label: "Camera Diagnostics Export",
                     value: camera.runtimeDiagnostics.exportText
                 )
+                CameraChromeProbe(
+                    identifier: "camera.intelligence.availability",
+                    label: "Apple Intelligence Availability",
+                    value: intelligenceAvailability.accessibilityValue
+                )
+                CameraChromeProbe(
+                    identifier: "camera.captureContext.privacy",
+                    label: "Capture Context Privacy",
+                    value: captureContextPrivacyValue
+                )
+                CameraChromeProbe(
+                    identifier: "camera.captureCoach.firstSuggestion",
+                    label: "Capture Coach First Suggestion",
+                    value: captureCoachFirstSuggestionValue
+                )
+                CameraChromeProbe(
+                    identifier: "camera.captureCoach.source",
+                    label: "Capture Coach Source",
+                    value: captureCoachSourceValue
+                )
+                CameraChromeProbe(
+                    identifier: "camera.bracketPlan.current",
+                    label: "Current Bracket Plan",
+                    value: currentBracketPlanAccessibilityValue
+                )
+                CameraChromeProbe(
+                    identifier: "camera.appIntent.lastHandoff",
+                    label: "App Intent Last Handoff",
+                    value: appIntentRouter.lastHandoff?.accessibilityValue ?? "No App Intent handoff"
+                )
+                CameraChromeProbe(
+                    identifier: "camera.appIntent.shortcutInventory",
+                    label: "App Intent Shortcut Inventory",
+                    value: BracketerShortcutTileInventory.current.accessibilityValue
+                )
+                CameraChromeProbe(
+                    identifier: "camera.project.latest",
+                    label: "Latest Bracket Project",
+                    value: camera.lastBracketProject?.accessibilityValue ?? "No bracket project"
+                )
+                CameraChromeProbe(
+                    identifier: "camera.project.reviewHandoff",
+                    label: "Project Review Handoff",
+                    value: camera.restoredProjectReviewSnapshot?.accessibilityValue ?? "No project review handoff"
+                )
 
                 if isLandscape {
                     // In landscape, avoid overlaying controls on top of the preview:
@@ -143,6 +240,12 @@ struct ModernContentView: View {
                         )
                         .padding(.top, safeTop + 8)
                         .padding(.horizontal, 16)
+
+                        if shouldShowGuidanceStack {
+                            cameraGuidanceStack
+                                .padding(.top, 10)
+                                .padding(.horizontal, 16)
+                        }
 
                         cameraPreview
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -219,9 +322,19 @@ struct ModernContentView: View {
                             )
                             .padding(.bottom, safeBottom + 12)
                         }
+
+                        if shouldShowGuidanceStack {
+                            VStack {
+                                Spacer()
+                                    .frame(height: safeTop + 78)
+                                cameraGuidanceStack
+                                    .padding(.horizontal, 16)
+                                Spacer()
+                            }
+                        }
                     }
                 }
-                
+
                 // Pro Controls Overlay
                 if showProControls {
                     ModernProControls(
@@ -237,7 +350,7 @@ struct ModernContentView: View {
                         showZebras: $showZebras,
                         bracketShotCount: $settings.bracketShotCount
                     )
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .transition(bottomSheetTransition)
                 }
 
                 // Settings Overlay - slides up from bottom (iOS style bottom sheet)
@@ -253,11 +366,32 @@ struct ModernContentView: View {
                         focusPeakingIntensity: $settings.focusPeakingIntensity,
                         teleUses12MP: $settings.teleUses12MP,
                         flashMode: $settings.flashMode,
-                        timerMode: $settings.timerMode
+                        timerMode: $settings.timerMode,
+                        intelligenceAvailability: intelligenceAvailability,
+                        captureCoachRun: currentCaptureCoachRun,
+                        isRefreshingCaptureCoach: isRefreshingCaptureCoach,
+                        refreshCaptureCoach: {
+                            Task {
+                                await refreshCaptureCoach()
+                            }
+                        },
+                        bracketRecipePrompt: bracketRecipePromptBinding,
+                        bracketRecipeRun: currentBracketRecipeRun,
+                        isPlanningBracketRecipe: isPlanningBracketRecipe,
+                        planBracketRecipe: {
+                            Task {
+                                await planBracketRecipe()
+                            }
+                        },
+                        applyBracketRecipe: applyBracketRecipe,
+                        appliedBracketRecipeValue: appliedBracketRecipeValue,
+                        recentBracketRecipes: settings.recentBracketRecipes,
+                        storesGeneratedProjectNotes: $settings.storesGeneratedProjectNotes,
+                        selectedCategory: $selectedSettingsCategory
                     )
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .transition(bottomSheetTransition)
                 }
-                
+
                 // Loading and progress overlays
                 if camera.isInitializing {
                     ModernLoadingOverlay()
@@ -278,7 +412,7 @@ struct ModernContentView: View {
                             .padding(.top, 80)
                         Spacer()
                     }
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .transition(topNotificationTransition)
                     .zIndex(100)
                 }
 
@@ -302,13 +436,23 @@ struct ModernContentView: View {
                         .padding(.top, safeTop + 64)
                         Spacer()
                     }
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .transition(topNotificationTransition)
                     .zIndex(99)
                 }
 
                 if enablesReviewFixtureForUITests {
                     DeterministicImageReviewFixtureView(onDismiss: {})
                         .zIndex(1_000)
+                }
+
+                if let reviewAccessibilityFixtureSnapshot {
+                    BracketProjectReviewHandoffView(
+                        snapshot: reviewAccessibilityFixtureSnapshot,
+                        intelligenceAvailability: intelligenceAvailability
+                    ) {
+                        self.reviewAccessibilityFixtureSnapshot = nil
+                    }
+                    .zIndex(1_001)
                 }
 
             }
@@ -324,7 +468,12 @@ struct ModernContentView: View {
 
                 // Auto-hide toast after 2 seconds using cancellable task
                 let task = DispatchWorkItem {
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                    withAnimation(
+                        ModernDesignSystem.Animations.motionAware(
+                            .spring(response: 0.3, dampingFraction: 0.7),
+                            reduceMotionEnabled: effectiveAccessibilityReduceMotion
+                        )
+                    ) {
                         showModeChangeToast = false
                     }
                 }
@@ -347,16 +496,24 @@ struct ModernContentView: View {
                 prepareSimulatedReviewFromUITest()
             }
         }
+        .onChange(of: appIntentRouter.lastHandoff) { _, handoff in
+            handleAppIntentHandoff(handoff)
+        }
         .onChange(of: settings.teleUses12MP) { _, newValue in
             camera.teleUses12MP = newValue
             if camera.selectedCamera == .twoX || camera.selectedCamera == .eightX {
                 camera.switchCamera(to: camera.selectedCamera)
             }
         }
+        .onChange(of: settings.storesGeneratedProjectNotes) { _, newValue in
+            camera.storesGeneratedProjectNotes = newValue
+        }
         .task {
             // Connect orientation manager to camera
             camera.orientationManager = orientationManager
             camera.teleUses12MP = settings.teleUses12MP
+            camera.storesGeneratedProjectNotes = settings.storesGeneratedProjectNotes
+            camera.intelligenceAvailabilityForProjectNotes = intelligenceAvailability
             if usesFocusPeakingFixtureForUITests {
                 settings.focusPeakingEnabled = true
                 settings.focusPeakingColor = .green
@@ -365,12 +522,17 @@ struct ModernContentView: View {
             if enablesSimulatedCameraForUITests {
                 camera.enableSimulatedCaptureForUITests()
             }
+            openReviewAccessibilityFixtureForUITestIfNeeded()
             await resumeRuntimeServices()
             // Align the zoom UI with the active logical camera
             selectedZoom = CameraZoomLevel.forCameraKind(camera.selectedCamera)
         }
         .onAppear {
             motionManager.isLevelingActive = settings.showLevel
+            handleAppIntentHandoff(appIntentRouter.lastHandoff)
+            openTimedCaptureHandoffForUITestIfNeeded()
+            openLatestReviewHandoffForUITestIfNeeded()
+            openLatestProjectReviewForUITestIfNeeded()
         }
         .environmentObject(orientationManager)
         .onDisappear {
@@ -396,7 +558,11 @@ struct ModernContentView: View {
         .fullScreenCover(isPresented: $camera.showImageViewer) {
             // If we don't have assets for some reason, present a simple fallback
             if let simulatedReview = camera.simulatedBracketReview {
-                SimulatedBracketReviewView(review: simulatedReview) {
+                SimulatedBracketReviewView(
+                    review: simulatedReview,
+                    appliedRecipeRecord: camera.activeBracketRecipeRecord,
+                    intelligenceAvailability: intelligenceAvailability
+                ) {
                     camera.showImageViewer = false
                 }
             } else if camera.lastBracketAssets.isEmpty {
@@ -416,14 +582,29 @@ struct ModernContentView: View {
                 ImageViewer(
                     bracketAssets: camera.lastBracketAssets,
                     reviewSequence: camera.lastBracketReviewSequence,
-                    bracketManifest: camera.lastBracketManifest
+                    bracketManifest: camera.lastBracketManifest,
+                    intelligenceAvailability: intelligenceAvailability,
+                    onResourceInspectionUpdate: { shotResources in
+                        _ = try? camera.updateLatestProjectResourceInspection(shotResources: shotResources)
+                    },
+                    onThumbnailInspectionUpdate: { shotThumbnail in
+                        _ = try? camera.updateLatestProjectThumbnailInspection(shotThumbnail: shotThumbnail)
+                    }
                 ) {
                     camera.showImageViewer = false
                 }
             }
         }
+        .fullScreenCover(item: restoredProjectReviewBinding) { snapshot in
+            BracketProjectReviewHandoffView(
+                snapshot: snapshot,
+                intelligenceAvailability: intelligenceAvailability
+            ) {
+                camera.clearRestoredProjectReview()
+            }
+        }
     }
-    
+
     private func toggleGrid() {
         settings.showGrid.toggle()
         HapticManager.shared.gridTypeChanged()
@@ -470,6 +651,336 @@ struct ModernContentView: View {
         return nil
     }
 
+    private var captureContextSummary: CaptureContextSummary {
+        let contextSettings = CaptureContextSettings(
+            shootingMode: settings.currentShootingMode.rawValue,
+            showGrid: settings.showGrid,
+            gridType: settings.gridType.rawValue,
+            showLevel: settings.showLevel,
+            focusPeakingEnabled: settings.focusPeakingEnabled,
+            focusPeakingColorName: focusPeakingColorName,
+            focusPeakingIntensity: settings.focusPeakingIntensity,
+            showHistogram: showHistogram,
+            showZebras: showZebras
+        )
+
+        return CaptureContextSummary.make(
+            plan: currentBracketPlan,
+            deviceSnapshot: DeviceGating.shared.capabilitySnapshot,
+            captureConfiguration: camera.effectiveCaptureConfiguration(
+                flashMode: settings.flashMode,
+                timerMode: settings.timerMode
+            ),
+            settings: contextSettings,
+            frameAnalysis: uiTestFrameAnalysisOverride ?? camera.histogramProcessor.frameAnalysis,
+            reviewSequence: camera.lastBracketReviewSequence,
+            manifest: camera.lastBracketManifest,
+            intelligenceAvailability: intelligenceAvailability
+        )
+    }
+
+    private var captureCoachResponse: CaptureCoachResponse {
+        let request = CaptureCoachRequest.make(
+            task: .preCaptureGuidance,
+            context: captureContextSummary
+        )
+        return DeterministicCaptureCoach.response(for: request)
+    }
+
+    private var currentCaptureCoachRun: CaptureCoachRun {
+        refreshedCaptureCoachRun ?? CaptureCoachRun(
+            source: .deterministicFallback,
+            response: captureCoachResponse,
+            fallbackReason: "Not refreshed in this session."
+        )
+    }
+
+    private var bracketRecipePromptBinding: Binding<String> {
+        Binding(
+            get: { bracketRecipePrompt },
+            set: { newValue in
+                bracketRecipePrompt = newValue
+                refreshedBracketRecipeRun = nil
+            }
+        )
+    }
+
+    private var bracketRecipeResponse: BracketRecipeResponse {
+        let request = BracketRecipeRequest.make(
+            prompt: bracketRecipePrompt,
+            context: captureContextSummary
+        )
+        return DeterministicBracketRecipePlanner.response(for: request)
+    }
+
+    private var currentBracketRecipeRun: BracketRecipeRun {
+        refreshedBracketRecipeRun ?? BracketRecipeRun(
+            source: .deterministicFallback,
+            response: bracketRecipeResponse,
+            fallbackReason: "Not planned in this session."
+        )
+    }
+
+    private var captureContextPrivacyValue: String {
+        captureContextSummary.privacy.notes.joined(separator: " | ")
+    }
+
+    private var captureCoachFirstSuggestionValue: String {
+        guard let suggestion = currentCaptureCoachRun.response.suggestions.first else {
+            return "No suggestions"
+        }
+        return "\(suggestion.title) | \(suggestion.rationale) | Action: \(suggestion.action)"
+    }
+
+    private var currentBracketPlan: BracketPlan {
+        BracketPlan(
+            evStep: settings.selectedEVStep,
+            requestedShotCount: settings.bracketShotCount,
+            centerBias: currentEVCompensation
+        )
+    }
+
+    private var currentBracketPlanAccessibilityValue: String {
+        let offsets = currentBracketPlan.shots.map(\.displayLabel).joined(separator: ", ")
+        return "\(currentBracketPlan.shotCount) shots | \(offsets) | Center \(BracketEVFormatter.displayLabel(for: currentBracketPlan.centerBias))"
+    }
+
+    private var appliedBracketRecipeValue: String {
+        activeBracketRecipe?.accessibilityValue ?? "No bracket recipe applied"
+    }
+
+    private var restoredProjectReviewBinding: Binding<BracketProjectReviewSnapshot?> {
+        Binding(
+            get: { camera.restoredProjectReviewSnapshot },
+            set: { snapshot in
+                if snapshot == nil {
+                    camera.clearRestoredProjectReview()
+                }
+            }
+        )
+    }
+
+    private var shouldShowGuidanceStack: Bool {
+        !showProControls
+            && !showSettings
+            && !camera.bracketSequenceState.isActive
+            && !camera.isInitializing
+    }
+
+    private var cameraGuidanceStack: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            CaptureCoachCompactCard(
+                run: currentCaptureCoachRun,
+                availability: intelligenceAvailability,
+                action: openIntelligenceSettings
+            )
+            BracketPlanPreviewStrip(
+                plan: currentBracketPlan,
+                activeRecipe: activeBracketRecipe,
+                action: openIntelligenceSettings
+            )
+        }
+    }
+
+    private var captureCoachSourceValue: String {
+        let run = currentCaptureCoachRun
+        return [
+            run.source.rawValue,
+            run.fallbackReason ?? "No fallback",
+        ].joined(separator: " | ")
+    }
+
+    private var focusPeakingColorName: String {
+        let colors: [(name: String, color: Color)] = [
+            ("red", .red),
+            ("blue", .blue),
+            ("yellow", .yellow),
+            ("green", .green),
+            ("orange", .orange),
+            ("purple", .purple),
+            ("white", .white),
+        ]
+        return colors.first { $0.color == settings.focusPeakingColor }?.name ?? "custom"
+    }
+
+    @MainActor
+    private func refreshCaptureCoach() async {
+        guard !isRefreshingCaptureCoach else { return }
+
+        isRefreshingCaptureCoach = true
+        defer { isRefreshingCaptureCoach = false }
+
+        let request = CaptureCoachRequest.make(
+            task: .preCaptureGuidance,
+            context: captureContextSummary
+        )
+        refreshedCaptureCoachRun = await CaptureCoachEngine.live.response(for: request)
+    }
+
+    @MainActor
+    private func planBracketRecipe() async {
+        guard !isPlanningBracketRecipe else { return }
+
+        isPlanningBracketRecipe = true
+        defer { isPlanningBracketRecipe = false }
+
+        let request = BracketRecipeRequest.make(
+            prompt: bracketRecipePrompt,
+            context: captureContextSummary
+        )
+        refreshedBracketRecipeRun = await BracketRecipeEngine.live.response(for: request)
+    }
+
+    private func applyBracketRecipe(_ recommendation: BracketRecipeRecommendation) {
+        let appliedPlan = settings.applyBracketRecipePlan(recommendation.plan)
+        let appliedRecipeRecord = AppliedBracketRecipeRecord(
+            title: recommendation.title,
+            source: currentBracketRecipeRun.source,
+            plan: BracketRecipePlan(
+                evStep: appliedPlan.evStep,
+                requestedShotCount: appliedPlan.shotCount,
+                centerBias: appliedPlan.centerBias
+            )
+        )
+        currentEVCompensation = appliedPlan.centerBias
+        camera.setExposureCompensation(appliedPlan.centerBias)
+        refreshedCaptureCoachRun = nil
+        activeBracketRecipeRecord = appliedRecipeRecord
+        camera.activeBracketRecipeRecord = appliedRecipeRecord
+        activeBracketRecipe = ActiveBracketRecipeSummary(
+            record: appliedRecipeRecord
+        )
+        settings.recordAppliedBracketRecipe(appliedRecipeRecord)
+        HapticManager.shared.panelToggled()
+    }
+
+    private func openIntelligenceSettings() {
+        selectedSettingsCategory = .intelligence
+        withAnimation(motionAwareSpring) {
+            showSettings = true
+        }
+        HapticManager.shared.panelToggled()
+    }
+
+    private func handleAppIntentHandoff(_ handoff: BracketerAppIntentHandoff?) {
+        guard let handoff else { return }
+        guard handledAppIntentRoutingIdentifier != handoff.routingIdentifier else { return }
+
+        handledAppIntentRoutingIdentifier = handoff.routingIdentifier
+        applyAppIntentCapturePreparation(handoff)
+        switch handoff.destination {
+        case .camera:
+            showSettings = false
+            showProControls = false
+        case .proControls:
+            showSettings = false
+            withAnimation(motionAwareSpring) {
+                showProControls = true
+            }
+        case .intelligence:
+            openIntelligenceSettings()
+        case .review:
+            let source = handoff.projectTitle.map { "Project Handoff: \($0)" } ?? "Project Handoff: Latest Review"
+            if let projectIdentifier = handoff.projectIdentifier {
+                _ = camera.restoreProjectReview(
+                    projectID: projectIdentifier,
+                    source: source,
+                    openedAt: handoff.requestedAt
+                )
+            } else {
+                _ = camera.restoreLatestProjectReview(
+                    source: source,
+                    openedAt: handoff.requestedAt
+                )
+            }
+        }
+    }
+
+    private func applyAppIntentCapturePreparation(_ handoff: BracketerAppIntentHandoff) {
+        settings.selectedEVStep = handoff.bracketPreset.evStep
+        settings.bracketShotCount = handoff.bracketPreset.shotCount
+        if let timerMode = handoff.timerMode {
+            settings.timerMode = timerMode.timerMode
+        }
+    }
+
+    private func openLatestProjectReviewForUITestIfNeeded() {
+        guard opensLatestProjectReviewForUITests, !didOpenProjectReviewForUITest else { return }
+        didOpenProjectReviewForUITest = true
+        _ = camera.restoreLatestProjectReview(
+            source: "UI Test Project Handoff",
+            openedAt: Date(timeIntervalSince1970: 0)
+        )
+    }
+
+    private func openTimedCaptureHandoffForUITestIfNeeded() {
+        guard opensTimedCaptureHandoffForUITests, !didOpenTimedCaptureHandoffForUITest else { return }
+        didOpenTimedCaptureHandoffForUITest = true
+        let handoff = BracketerAppIntentHandoff(
+            destination: .camera,
+            bracketPreset: .fiveShotTwoEV,
+            requestedAt: Date(timeIntervalSince1970: 0),
+            timerMode: .threeSeconds
+        )
+        BracketerAppIntentRouter.shared.handle(handoff)
+        handleAppIntentHandoff(handoff)
+    }
+
+    private func openLatestReviewHandoffForUITestIfNeeded() {
+        guard opensLatestReviewHandoffForUITests, !didOpenProjectReviewForUITest else { return }
+        didOpenProjectReviewForUITest = true
+        let handoff = BracketerAppIntentHandoff(
+            destination: .review,
+            bracketPreset: .threeShotOneEV,
+            requestedAt: Date(timeIntervalSince1970: 0),
+            projectTitle: "Latest Review"
+        )
+        BracketerAppIntentRouter.shared.handle(handoff)
+        handleAppIntentHandoff(handoff)
+    }
+
+    private func openReviewAccessibilityFixtureForUITestIfNeeded() {
+        guard opensReviewAccessibilityFixtureForUITests, !didOpenProjectReviewForUITest else { return }
+        didOpenProjectReviewForUITest = true
+        let plan = BracketPlan(evStep: 2.0, requestedShotCount: 5)
+        let sequence = BracketReviewSequence.make(
+            plan: plan,
+            assetIdentifiers: [
+                "review-accessibility--4.0EV",
+                "review-accessibility--2.0EV",
+                "review-accessibility-0EV",
+                "review-accessibility-+2.0EV",
+                "review-accessibility-+4.0EV",
+            ],
+            capturedAt: Date(timeIntervalSince1970: 0),
+            fileType: "RAW + Processed",
+            metadataAvailability: .available(summary: "18 metadata keys / 4032 x 3024 / ISO 125 / Wide Camera"),
+            availableRepresentations: [.processed, .raw]
+        )
+        let manifest = sequence.manifest(
+            groupIdentifier: "review-accessibility-fixture",
+            source: .photos,
+            plan: plan,
+            captureMotion: .unavailable(
+                source: "UI-test review fixture motion manager not connected",
+                captureDurationMilliseconds: 420
+            )
+        )
+        let project = BracketProject.make(
+            manifest: manifest,
+            reviewSequence: sequence,
+            createdAt: Date(timeIntervalSince1970: 0)
+        )
+        camera.lastBracketProject = project
+        camera.lastBracketManifest = manifest
+        camera.lastBracketReviewSequence = sequence
+        reviewAccessibilityFixtureSnapshot = BracketProjectReviewSnapshot(
+            project: project,
+            openedAt: Date(timeIntervalSince1970: 0),
+            source: "UI Test Review Accessibility Fixture"
+        )
+    }
+
     private func prepareSimulatedReviewFromUITest() {
         let plan = BracketPlan(
             evStep: settings.selectedEVStep,
@@ -478,7 +989,22 @@ struct ModernContentView: View {
         )
         let simulatedReview = SimulatedBracketReview.make(plan: plan)
         camera.simulatedBracketReview = simulatedReview
-        camera.lastBracketManifest = simulatedReview.manifest
+        camera.activeBracketRecipeRecord = activeBracketRecipeRecord
+        camera.storesGeneratedProjectNotes = settings.storesGeneratedProjectNotes
+        camera.intelligenceAvailabilityForProjectNotes = intelligenceAvailability
+        let sequence = simulatedReview.sequence
+        let manifest = sequence.manifest(
+            groupIdentifier: simulatedReview.id,
+            source: .simulated,
+            plan: simulatedReview.plan,
+            recipe: activeBracketRecipeRecord
+        )
+        camera.lastBracketReviewSequence = sequence
+        camera.lastBracketManifest = manifest
+        camera.recordLatestBracketProject(
+            manifest: manifest,
+            reviewSequence: sequence
+        )
     }
 
     private func resumeRuntimeServices() async {
@@ -504,12 +1030,266 @@ struct CameraChromeProbe: View {
     var value: String?
 
     var body: some View {
-        Color.clear
+        Text(label)
+            .font(.system(size: 1))
+            .foregroundColor(.white.opacity(0.01))
             .frame(width: 1, height: 1)
-            .accessibilityElement()
+            .clipped()
+            .allowsHitTesting(false)
+            .accessibilityElement(children: .ignore)
             .accessibilityLabel(label)
             .accessibilityValue(value ?? "")
             .accessibilityIdentifier(identifier)
+    }
+}
+
+private struct CaptureCoachCompactCard: View {
+    let run: CaptureCoachRun
+    let availability: IntelligenceFeatureAvailability
+    let action: () -> Void
+
+    private var suggestion: CaptureCoachSuggestion? {
+        run.response.suggestions.first
+    }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(alignment: .center, spacing: 10) {
+                Image(systemName: iconName)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(tint)
+                    .frame(width: 28, height: 28)
+                    .background(
+                        Circle()
+                            .fill(tint.opacity(0.16))
+                    )
+
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(sourceTitle)
+                            .font(ModernDesignSystem.Typography.caption2)
+                            .foregroundColor(tint)
+                            .lineLimit(1)
+
+                        Circle()
+                            .fill(availability.isUsable ? ModernDesignSystem.Colors.success : ModernDesignSystem.Colors.warning)
+                            .frame(width: 5, height: 5)
+                    }
+
+                    Text(suggestion?.title ?? "Capture Coach")
+                        .font(ModernDesignSystem.Typography.caption)
+                        .foregroundColor(ModernDesignSystem.Colors.cameraControl)
+                        .lineLimit(1)
+
+                    Text(suggestion?.action ?? "Open AI capture guidance.")
+                        .font(ModernDesignSystem.Typography.caption2)
+                        .foregroundColor(ModernDesignSystem.Colors.cameraControlSecondary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 8)
+
+                Image(systemName: "chevron.up")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(ModernDesignSystem.Colors.cameraControlSecondary)
+            }
+            .padding(.vertical, 10)
+            .padding(.horizontal, 12)
+            .frame(width: 320, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color.black.opacity(0.46))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .liquidGlass(intensity: .regular, tint: tint.opacity(0.12), interactive: true)
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Capture Coach")
+        .accessibilityValue(accessibilityValue)
+        .accessibilityIdentifier("camera.captureCoach.card")
+    }
+
+    private var sourceTitle: String {
+        switch run.source {
+        case .foundationModels:
+            return "Apple Intelligence"
+        case .deterministicFallback:
+            return "Deterministic Coach"
+        }
+    }
+
+    private var iconName: String {
+        switch run.source {
+        case .foundationModels:
+            return "sparkles"
+        case .deterministicFallback:
+            return "checklist"
+        }
+    }
+
+    private var tint: Color {
+        switch run.source {
+        case .foundationModels:
+            return ModernDesignSystem.Colors.accentTertiary
+        case .deterministicFallback:
+            return ModernDesignSystem.Colors.professional
+        }
+    }
+
+    private var accessibilityValue: String {
+        guard let suggestion else {
+            return "\(run.source.rawValue) | No suggestions | \(run.fallbackReason ?? "No fallback")"
+        }
+
+        return [
+            "\(suggestion.title) | \(suggestion.rationale) | Action: \(suggestion.action)",
+            "Source: \(run.source.rawValue)",
+            run.fallbackReason ?? "No fallback",
+        ].joined(separator: " | ")
+    }
+}
+
+private struct ActiveBracketRecipeSummary: Equatable {
+    let title: String
+    let source: BracketRecipeRunSource
+    let plan: BracketRecipePlan
+
+    init(record: AppliedBracketRecipeRecord) {
+        self.title = record.title
+        self.source = record.source
+        self.plan = record.plan
+    }
+
+    var sourceLabel: String {
+        switch source {
+        case .foundationModels:
+            return "Apple Intelligence"
+        case .deterministicFallback:
+            return "Deterministic"
+        }
+    }
+
+    var accessibilityValue: String {
+        "\(title) | \(plan.accessibilitySummary) | Source: \(source.rawValue)"
+    }
+}
+
+private struct BracketPlanPreviewStrip: View {
+    let plan: BracketPlan
+    let activeRecipe: ActiveBracketRecipeSummary?
+    let action: () -> Void
+
+    var body: some View {
+        Group {
+            if activeRecipe != nil {
+                Button(action: action) {
+                    stripContent
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint("Opens Settings AI")
+            } else {
+                stripContent
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Bracket Plan")
+        .accessibilityValue(accessibilityValue)
+        .accessibilityIdentifier("camera.bracketPlan.strip")
+    }
+
+    private var stripContent: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 8) {
+                Label("\(plan.shotCount) shot bracket", systemImage: "camera.aperture")
+                    .font(ModernDesignSystem.Typography.caption2)
+                    .foregroundColor(ModernDesignSystem.Colors.cameraControlSecondary)
+                    .lineLimit(1)
+
+                Spacer(minLength: 8)
+
+                Text("Center \(BracketEVFormatter.displayLabel(for: plan.centerBias))")
+                    .font(ModernDesignSystem.Typography.caption2)
+                    .foregroundColor(ModernDesignSystem.Colors.cameraControlSecondary)
+                    .lineLimit(1)
+            }
+
+            if let activeRecipe {
+                HStack(spacing: 6) {
+                    Image(systemName: "wand.and.stars")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(ModernDesignSystem.Colors.accentTertiary)
+
+                    Text(activeRecipe.title)
+                        .font(ModernDesignSystem.Typography.caption2)
+                        .foregroundColor(ModernDesignSystem.Colors.cameraControl)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+
+                    Spacer(minLength: 6)
+
+                    Text(activeRecipe.sourceLabel)
+                        .font(ModernDesignSystem.Typography.caption2)
+                        .foregroundColor(ModernDesignSystem.Colors.cameraControlSecondary)
+                        .lineLimit(1)
+
+                    Image(systemName: "chevron.up")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(ModernDesignSystem.Colors.cameraControlSecondary)
+                }
+                .padding(.vertical, 5)
+                .padding(.horizontal, 8)
+                .background(
+                    Capsule()
+                        .fill(Color.white.opacity(0.06))
+                )
+            }
+
+            HStack(spacing: 6) {
+                ForEach(plan.shots) { shot in
+                    VStack(spacing: 3) {
+                        Capsule()
+                            .fill(shot.isCenterExposure ? ModernDesignSystem.Colors.success : tint(for: shot))
+                            .frame(width: 5, height: barHeight(for: shot))
+
+                        Text(shot.displayLabel)
+                            .font(.system(size: 9, weight: shot.isCenterExposure ? .bold : .medium, design: .monospaced))
+                            .foregroundColor(shot.isCenterExposure ? ModernDesignSystem.Colors.cameraControl : ModernDesignSystem.Colors.cameraControlSecondary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+            }
+        }
+        .padding(.vertical, 9)
+        .padding(.horizontal, 12)
+        .frame(width: 320, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color.black.opacity(0.38))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .liquidGlass(intensity: .subtle, tint: .orange.opacity(0.10), interactive: false)
+                )
+        )
+    }
+
+    private func tint(for shot: BracketShot) -> Color {
+        shot.evOffset < plan.centerBias ? ModernDesignSystem.Colors.professional : ModernDesignSystem.Colors.warning
+    }
+
+    private func barHeight(for shot: BracketShot) -> CGFloat {
+        10 + CGFloat(min(abs(shot.evOffset - plan.centerBias), 4)) * 4
+    }
+
+    private var accessibilityValue: String {
+        let offsets = plan.shots.map(\.displayLabel).joined(separator: ", ")
+        let base = "\(plan.shotCount) shots | \(offsets) | Center \(BracketEVFormatter.displayLabel(for: plan.centerBias))"
+        guard let activeRecipe else { return base }
+        return "\(base) | Recipe: \(activeRecipe.title) | Source: \(activeRecipe.source.rawValue)"
     }
 }
 
@@ -741,11 +1521,21 @@ struct ModernToggleButton: View {
 
 
 struct ModernProControlButton: View {
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @Binding var showProControls: Bool
+
+    private var effectiveAccessibilityReduceMotion: Bool {
+        accessibilityReduceMotion
+            || ProcessInfo.processInfo.arguments.contains("-ui-testing-force-accessibility-environment")
+    }
 
     var body: some View {
         Button {
-            withAnimation(ModernDesignSystem.Animations.spring) {
+            withAnimation(
+                ModernDesignSystem.Animations.motionAwareSpring(
+                    reduceMotionEnabled: effectiveAccessibilityReduceMotion
+                )
+            ) {
                 showProControls.toggle()
             }
             HapticManager.shared.panelToggled()
@@ -795,11 +1585,21 @@ struct ModernPhotoLibraryButton: View {
 }
 
 struct ModernSettingsButton: View {
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @Binding var showSettings: Bool
+
+    private var effectiveAccessibilityReduceMotion: Bool {
+        accessibilityReduceMotion
+            || ProcessInfo.processInfo.arguments.contains("-ui-testing-force-accessibility-environment")
+    }
 
     var body: some View {
         Button {
-            withAnimation(ModernDesignSystem.Animations.spring) {
+            withAnimation(
+                ModernDesignSystem.Animations.motionAwareSpring(
+                    reduceMotionEnabled: effectiveAccessibilityReduceMotion
+                )
+            ) {
                 showSettings.toggle()
             }
             HapticManager.shared.panelToggled()
@@ -826,11 +1626,21 @@ struct ModernSettingsButton: View {
 }
 
 struct CompactProControlsBadge: View {
+    @Environment(\.accessibilityReduceMotion) private var accessibilityReduceMotion
     @Binding var showProControls: Bool
+
+    private var effectiveAccessibilityReduceMotion: Bool {
+        accessibilityReduceMotion
+            || ProcessInfo.processInfo.arguments.contains("-ui-testing-force-accessibility-environment")
+    }
 
     var body: some View {
         Button {
-            withAnimation(ModernDesignSystem.Animations.spring) {
+            withAnimation(
+                ModernDesignSystem.Animations.motionAwareSpring(
+                    reduceMotionEnabled: effectiveAccessibilityReduceMotion
+                )
+            ) {
                 showProControls.toggle()
             }
             HapticManager.shared.panelToggled()
@@ -844,6 +1654,7 @@ struct CompactProControlsBadge: View {
             .foregroundColor(showProControls ? .purple : .white.opacity(0.9))
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
+            .frame(minWidth: 44, minHeight: 44)
             .background(
                 Capsule()
                     .liquidGlass(
@@ -865,12 +1676,12 @@ struct ModernLoadingOverlay: View {
     var body: some View {
         ZStack {
             ModernDesignSystem.Colors.cameraOverlay.ignoresSafeArea()
-            
+
             VStack(spacing: ModernDesignSystem.Spacing.lg) {
                 ProgressView()
                     .scaleEffect(1.5)
                     .progressViewStyle(CircularProgressViewStyle(tint: ModernDesignSystem.Colors.cameraControlActive))
-                
+
                 Text("Initializing Camera")
                     .font(ModernDesignSystem.Typography.body)
                     .foregroundColor(ModernDesignSystem.Colors.cameraControl)

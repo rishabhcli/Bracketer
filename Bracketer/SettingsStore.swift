@@ -20,6 +20,8 @@ final class SettingsStore: ObservableObject {
         static let flashMode = "settings.flashMode"
         static let timerMode = "settings.timerMode"
         static let teleUses12MP = "settings.teleUses12MP"
+        static let recentBracketRecipes = "settings.recentBracketRecipes"
+        static let storesGeneratedProjectNotes = "settings.storesGeneratedProjectNotes"
     }
 
     private enum Defaults {
@@ -35,11 +37,13 @@ final class SettingsStore: ObservableObject {
         static let flashMode = FlashMode.off
         static let timerMode = TimerMode.off
         static let teleUses12MP = false
+        static let storesGeneratedProjectNotes = false
     }
 
     private static let focusPeakingIntensityRange: ClosedRange<Float> = 0.1...1.0
     private static let supportedEVSteps: [Float] = [1.0, 2.0, 3.0]
     private static let supportedBracketShotCounts = BracketPlan.supportedShotCounts
+    private static let recentBracketRecipeLimit = 5
 
     // MARK: - Viewfinder
 
@@ -118,6 +122,14 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(teleUses12MP, forKey: Keys.teleUses12MP) }
     }
 
+    @Published var storesGeneratedProjectNotes: Bool {
+        didSet { defaults.set(storesGeneratedProjectNotes, forKey: Keys.storesGeneratedProjectNotes) }
+    }
+
+    @Published private(set) var recentBracketRecipes: [AppliedBracketRecipeRecord] {
+        didSet { persistRecentBracketRecipes() }
+    }
+
     // MARK: - Init (load persisted values)
 
     init(defaults: UserDefaults = .standard) {
@@ -144,6 +156,8 @@ final class SettingsStore: ObservableObject {
         self.flashMode = Self.flashModeFromKey(defaults.string(forKey: Keys.flashMode) ?? Self.flashModeKey(Defaults.flashMode))
         self.timerMode = Self.timerModeFromKey(defaults.string(forKey: Keys.timerMode) ?? Self.timerModeKey(Defaults.timerMode))
         self.teleUses12MP = defaults.object(forKey: Keys.teleUses12MP) as? Bool ?? Defaults.teleUses12MP
+        self.storesGeneratedProjectNotes = defaults.object(forKey: Keys.storesGeneratedProjectNotes) as? Bool ?? Defaults.storesGeneratedProjectNotes
+        self.recentBracketRecipes = Self.decodedRecentBracketRecipes(from: defaults)
 
         if ProcessInfo.processInfo.arguments.contains("-ui-testing-reset-settings") {
             resetToDefaults()
@@ -163,6 +177,23 @@ final class SettingsStore: ObservableObject {
         focusPeakingIntensity = preset.focusPeakingIntensity
     }
 
+    @discardableResult
+    func applyBracketRecipePlan(_ plan: BracketRecipePlan) -> BracketPlan {
+        selectedEVStep = plan.evStep
+        bracketShotCount = plan.resolvedShotCount
+        return BracketPlan(
+            evStep: selectedEVStep,
+            requestedShotCount: bracketShotCount,
+            centerBias: plan.centerBias
+        )
+    }
+
+    func recordAppliedBracketRecipe(_ record: AppliedBracketRecipeRecord) {
+        var updated = [record]
+        updated.append(contentsOf: recentBracketRecipes.filter { !$0.matchesRecipe(record) })
+        recentBracketRecipes = Array(updated.prefix(Self.recentBracketRecipeLimit))
+    }
+
     func resetToDefaults() {
         showGrid = Defaults.showGrid
         gridType = Defaults.gridType
@@ -176,6 +207,8 @@ final class SettingsStore: ObservableObject {
         flashMode = Defaults.flashMode
         timerMode = Defaults.timerMode
         teleUses12MP = Defaults.teleUses12MP
+        storesGeneratedProjectNotes = Defaults.storesGeneratedProjectNotes
+        recentBracketRecipes = []
     }
 
     private func persistResolvedValues() {
@@ -191,6 +224,26 @@ final class SettingsStore: ObservableObject {
         defaults.set(flashModeKey(flashMode), forKey: Keys.flashMode)
         defaults.set(timerModeKey(timerMode), forKey: Keys.timerMode)
         defaults.set(teleUses12MP, forKey: Keys.teleUses12MP)
+        defaults.set(storesGeneratedProjectNotes, forKey: Keys.storesGeneratedProjectNotes)
+        persistRecentBracketRecipes()
+    }
+
+    private func persistRecentBracketRecipes() {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        if let data = try? encoder.encode(recentBracketRecipes) {
+            defaults.set(data, forKey: Keys.recentBracketRecipes)
+        }
+    }
+
+    private static func decodedRecentBracketRecipes(from defaults: UserDefaults) -> [AppliedBracketRecipeRecord] {
+        guard let data = defaults.data(forKey: Keys.recentBracketRecipes) else { return [] }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let decoded = try? decoder.decode([AppliedBracketRecipeRecord].self, from: data) else {
+            return []
+        }
+        return Array(decoded.prefix(recentBracketRecipeLimit))
     }
 
     private static func normalizedFocusPeakingIntensity(_ value: Float) -> Float {

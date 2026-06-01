@@ -379,9 +379,15 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
     @Published var lastBracketAssets: [PHAsset] = []
     @Published var lastBracketReviewSequence: BracketReviewSequence?
     @Published var lastBracketManifest: BracketManifest?
+    @Published var lastBracketProject: BracketProject?
+    @Published var restoredProjectReviewSnapshot: BracketProjectReviewSnapshot?
+    @Published private(set) var bracketProjectLibrarySnapshot = BracketProjectLibrarySnapshot.empty
+    @Published var activeBracketRecipeRecord: AppliedBracketRecipeRecord?
+    @Published var storesGeneratedProjectNotes = false
     @Published var simulatedBracketReview: SimulatedBracketReview?
     @Published var showImageViewer = false
     @Published var currentLensSupportsRaw: Bool = false
+    var intelligenceAvailabilityForProjectNotes: IntelligenceFeatureAvailability = .simulatorUnsupported
 
     @Published var teleUses12MP: Bool = false
 
@@ -394,6 +400,7 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
 
     // Bracketing configuration
     private var activeBracketPlan: BracketPlan?
+    private let projectStore: FileBracketProjectStore
 
     let session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: Constants.sessionQueueLabel)
@@ -411,11 +418,13 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
     private var sequenceStep: Int = 0
     private var sequenceTimestamp: Int?
     private var bracketAssetIds: [String] = []
+    private var sequenceHadLocationSample = false
     private var rawPixelFormat: OSType?
     private var maxPhotoDims: CMVideoDimensions?
 
     private let locationProvider = LocationProvider()
     let histogramProcessor = HistogramProcessor()
+    private let captureMotionRecorder = CaptureMotionRecorder()
     private var exposureUpdateTimer: Timer?
     private var notificationAuthorizationGranted = false
     private var cancellables = Set<AnyCancellable>()
@@ -434,8 +443,14 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
         }
     }
 
-    override init() {
+    init(projectStore: FileBracketProjectStore = .defaultStore()) {
+        self.projectStore = projectStore
         super.init()
+        if ProcessInfo.processInfo.arguments.contains("-ui-testing-reset-projects") {
+            try? projectStore.deleteAll()
+        }
+        lastBracketProject = try? projectStore.latest()
+        refreshBracketProjectLibrary()
         if ProcessInfo.processInfo.arguments.contains("-ui-testing-simulated-camera") {
             usesSimulatedCaptureForUITests = true
             isInitializing = false
@@ -462,6 +477,290 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
         )
     }
 
+    func recordLatestBracketProject(
+        manifest: BracketManifest,
+        reviewSequence: BracketReviewSequence?,
+        sidecar: BracketManifestSidecar? = nil
+    ) {
+        let projectSidecar = sidecar ?? BracketManifestSidecar.make(
+            manifest: manifest,
+            narrativeRun: storedGeneratedProjectNoteRun(
+                manifest: manifest,
+                reviewSequence: reviewSequence
+            ),
+            storesGeneratedNote: storesGeneratedProjectNotes
+        )
+        let project = BracketProject.make(
+            manifest: manifest,
+            reviewSequence: reviewSequence,
+            sidecar: projectSidecar,
+            diagnosticsSummary: runtimeDiagnostics.summaryAccessibilityValue
+        )
+        lastBracketProject = project
+
+        do {
+            try projectStore.save(project)
+            refreshBracketProjectLibrary()
+        } catch {
+            recordDiagnostic(
+                category: .storage,
+                severity: .warning,
+                title: "Project persistence failed",
+                detail: error.localizedDescription,
+                actionPath: "Settings > About > Export Diagnostics"
+            )
+        }
+    }
+
+    private func storedGeneratedProjectNoteRun(
+        manifest: BracketManifest,
+        reviewSequence: BracketReviewSequence?
+    ) -> BracketReviewNarrativeRun? {
+        guard storesGeneratedProjectNotes else { return nil }
+        let request = BracketReviewNarrativeRequest.make(
+            context: BracketNarrativeContext.make(
+                manifest: manifest,
+                sequence: reviewSequence,
+                intelligenceAvailability: intelligenceAvailabilityForProjectNotes
+            )
+        )
+        return DeterministicBracketReviewNarrative.run(
+            for: request,
+            fallbackReason: "Stored project note generated locally from manifest and review metadata."
+        )
+    }
+
+    @discardableResult
+    func updateLatestProjectResourceInspection(
+        shotResources: BracketProjectResourceInspection.ShotResources,
+        inspectedAt: Date = Date()
+    ) throws -> BracketProject {
+        do {
+            let latestProject = try projectStore.latest()
+            let projectID = lastBracketProject?.id ?? latestProject?.id ?? "latest"
+            guard let project = lastBracketProject ?? latestProject else {
+                throw BracketProjectResourceInspectionUpdateError.projectNotFound(projectID)
+            }
+            let inspection = project.resourceInspection?.replacingShotResources(
+                shotResources,
+                in: project,
+                inspectedAt: inspectedAt
+            ) ?? BracketProjectResourceInspection.make(
+                project: project,
+                source: .photosAssetResource,
+                inspectedAt: inspectedAt,
+                shotResources: [shotResources]
+            )
+            let updatedProject = project.withResourceInspection(inspection, updatedAt: inspectedAt)
+            try projectStore.save(updatedProject)
+            main {
+                self.lastBracketProject = updatedProject
+            }
+            refreshBracketProjectLibrary()
+            return updatedProject
+        } catch {
+            recordDiagnostic(
+                category: .photos,
+                severity: .warning,
+                title: "Project resource inspection failed",
+                detail: error.localizedDescription,
+                actionPath: "Open the latest bracket review again, then export diagnostics."
+            )
+            throw error
+        }
+    }
+
+    @discardableResult
+    func updateLatestProjectThumbnailInspection(
+        shotThumbnail: BracketProjectThumbnailInspection.ShotThumbnail,
+        inspectedAt: Date = Date()
+    ) throws -> BracketProject {
+        do {
+            let latestProject = try projectStore.latest()
+            let projectID = lastBracketProject?.id ?? latestProject?.id ?? "latest"
+            guard let project = lastBracketProject ?? latestProject else {
+                throw BracketProjectThumbnailInspectionUpdateError.projectNotFound(projectID)
+            }
+            let inspection = project.thumbnailInspection?.replacingShotThumbnail(
+                shotThumbnail,
+                in: project,
+                inspectedAt: inspectedAt
+            ) ?? BracketProjectThumbnailInspection.make(
+                project: project,
+                source: .photosImageManager,
+                inspectedAt: inspectedAt,
+                shotThumbnails: [shotThumbnail]
+            )
+            let updatedProject = project.withThumbnailInspection(inspection, updatedAt: inspectedAt)
+            try projectStore.save(updatedProject)
+            main {
+                self.lastBracketProject = updatedProject
+            }
+            refreshBracketProjectLibrary()
+            return updatedProject
+        } catch {
+            recordDiagnostic(
+                category: .photos,
+                severity: .warning,
+                title: "Project thumbnail inspection failed",
+                detail: error.localizedDescription,
+                actionPath: "Open the latest bracket review again, then export diagnostics."
+            )
+            throw error
+        }
+    }
+
+    func refreshBracketProjectLibrary(searchText: String = "") {
+        do {
+            let snapshot = try projectStore.librarySnapshot(searchText: searchText)
+            main { self.bracketProjectLibrarySnapshot = snapshot }
+        } catch {
+            let snapshot = BracketProjectLibrarySnapshot.failure(error.localizedDescription)
+            main { self.bracketProjectLibrarySnapshot = snapshot }
+        }
+    }
+
+    func restoreLatestProjectReview(
+        source: String = "Project Handoff",
+        openedAt: Date = Date()
+    ) -> BracketProjectReviewSnapshot? {
+        do {
+            guard let project = try projectStore.latest() else {
+                recordDiagnostic(
+                    category: .review,
+                    severity: .warning,
+                    title: "Project review unavailable",
+                    detail: "No saved Bracketer project is available to restore.",
+                    actionPath: "Capture a bracket, then open the project again."
+                )
+                return nil
+            }
+            return restoreProjectReview(project: project, source: source, openedAt: openedAt)
+        } catch {
+            recordProjectReviewRestoreFailure(error)
+            return nil
+        }
+    }
+
+    func restoreProjectReview(
+        projectID: String,
+        source: String = "Project Handoff",
+        openedAt: Date = Date()
+    ) -> BracketProjectReviewSnapshot? {
+        do {
+            guard let project = try projectStore.load(id: projectID) else {
+                recordDiagnostic(
+                    category: .review,
+                    severity: .warning,
+                    title: "Project review unavailable",
+                    detail: "Saved project \(projectID) could not be found.",
+                    actionPath: "Open Settings > About > Project Library and choose an available project."
+                )
+                return nil
+            }
+            return restoreProjectReview(project: project, source: source, openedAt: openedAt)
+        } catch {
+            recordProjectReviewRestoreFailure(error)
+            return nil
+        }
+    }
+
+    func clearRestoredProjectReview() {
+        restoredProjectReviewSnapshot = nil
+    }
+
+    func importProjectArchiveText(
+        _ archiveText: String,
+        importedAt: Date = Date(),
+        conflictPolicy: BracketProjectImportConflictPolicy = .keepBoth
+    ) throws -> BracketProjectImportBundle {
+        do {
+            let importBundle = try projectStore.importArchiveText(
+                archiveText,
+                importedAt: importedAt,
+                conflictPolicy: conflictPolicy
+            )
+            let project = importBundle.project
+            let sequence = BracketReviewSequence.make(manifest: project.manifest)
+            main {
+                self.lastBracketProject = project
+                self.lastBracketManifest = project.manifest
+                self.lastBracketReviewSequence = sequence
+            }
+            refreshBracketProjectLibrary()
+            return importBundle
+        } catch {
+            recordDiagnostic(
+                category: .storage,
+                severity: .warning,
+                title: "Project import failed",
+                detail: error.localizedDescription,
+                actionPath: "Settings > About > Import Project Bundle"
+            )
+            throw error
+        }
+    }
+
+    func previewProjectArchiveText(
+        _ archiveText: String,
+        importedAt: Date = Date(),
+        conflictPolicy: BracketProjectImportConflictPolicy = .keepBoth
+    ) throws -> BracketProjectImportPreview {
+        do {
+            return try projectStore.importPreview(
+                archiveText,
+                importedAt: importedAt,
+                conflictPolicy: conflictPolicy
+            )
+        } catch {
+            recordDiagnostic(
+                category: .storage,
+                severity: .warning,
+                title: "Project import preview failed",
+                detail: error.localizedDescription,
+                actionPath: "Settings > About > Import Project Bundle"
+            )
+            throw error
+        }
+    }
+
+    func updateProjectCuration(
+        projectID: String,
+        isFavorite: Bool,
+        acceptedTags: [String],
+        userNote: String?,
+        updatedAt: Date = Date()
+    ) throws -> BracketProject {
+        do {
+            guard let updatedProject = try projectStore.updateCuration(
+                id: projectID,
+                isFavorite: isFavorite,
+                acceptedTags: acceptedTags,
+                userNote: userNote,
+                updatedAt: updatedAt
+            ) else {
+                throw BracketProjectCurationError.projectNotFound(projectID)
+            }
+            let sequence = BracketReviewSequence.make(manifest: updatedProject.manifest)
+            main {
+                self.lastBracketProject = updatedProject
+                self.lastBracketManifest = updatedProject.manifest
+                self.lastBracketReviewSequence = sequence
+            }
+            refreshBracketProjectLibrary()
+            return updatedProject
+        } catch {
+            recordDiagnostic(
+                category: .storage,
+                severity: .warning,
+                title: "Project curation failed",
+                detail: error.localizedDescription,
+                actionPath: "Settings > About > Project Library"
+            )
+            throw error
+        }
+    }
+
     deinit {
         exposureUpdateTimer?.invalidate()
         countdownTask?.cancel()
@@ -477,6 +776,43 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
             self.selectedCamera = .wide
             self.currentLensSupportsRaw = false
         }
+    }
+
+    private func restoreProjectReview(
+        project: BracketProject,
+        source: String,
+        openedAt: Date
+    ) -> BracketProjectReviewSnapshot? {
+        do {
+            try projectStore.setCurrentProjectID(project.id)
+            let snapshot = BracketProjectReviewSnapshot(
+                project: project,
+                openedAt: openedAt,
+                source: source
+            )
+            main {
+                self.lastBracketProject = project
+                self.lastBracketManifest = project.manifest
+                self.lastBracketReviewSequence = snapshot.sequence
+                self.restoredProjectReviewSnapshot = snapshot
+                self.showImageViewer = false
+            }
+            refreshBracketProjectLibrary()
+            return snapshot
+        } catch {
+            recordProjectReviewRestoreFailure(error)
+            return nil
+        }
+    }
+
+    private func recordProjectReviewRestoreFailure(_ error: Error) {
+        recordDiagnostic(
+            category: .review,
+            severity: .warning,
+            title: "Project review restore failed",
+            detail: error.localizedDescription,
+            actionPath: "Open Settings > About > Project Library and retry."
+        )
     }
 
     private func setupOrientationObserver() {
@@ -661,7 +997,7 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
         locationProvider.requestWhenInUse()
         notificationAuthorizationGranted = await requestNotificationAuthorization()
     }
-    
+
     private func requestNotificationAuthorization() async -> Bool {
         await withCheckedContinuation { continuation in
             UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, _ in
@@ -760,6 +1096,7 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
                 self.lastBracketAssets = [asset]
                 self.lastBracketReviewSequence = nil
                 self.lastBracketManifest = nil
+                self.lastBracketProject = nil
                 self.showImageViewer = true
             }
         }
@@ -1215,8 +1552,10 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
             self.sequenceInFlight = true
             self.activeBracketPlan = plan
             self.activeCaptureStartTime = CACurrentMediaTime()
+            self.captureMotionRecorder.start()
             self.histogramProcessor.skipProcessing = true
             self.sequenceTimestamp = Int(Date().timeIntervalSince1970)
+            self.sequenceHadLocationSample = false
             self.rawPixelFormat = self.chooseRawPixelFormat()
 
             // Lock orientation to ensure all bracketed photos have the same orientation
@@ -1448,8 +1787,10 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
         activeBracketPlan = plan
         activeCaptureStartTime = CACurrentMediaTime()
         sequenceInFlight = true
+        sequenceHadLocationSample = false
         simulatedBracketReview = nil
         lastBracketManifest = nil
+        lastBracketProject = nil
         setBracketSequenceState(.preparing(plan: plan))
 
         simulatedCaptureTask = Task { [weak self] in
@@ -1476,8 +1817,21 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
                     assetIdentifiers: plan.shots.map { "simulated-\($0.filenameLabel)" }
                 )
                 let simulatedReview = SimulatedBracketReview.make(plan: plan)
+                let sequence = simulatedReview.sequence
+                let manifest = simulatedReview.manifest(
+                    recipe: self.activeBracketRecipeRecord,
+                    captureMotion: .unavailable(
+                        source: "simulated camera harness",
+                        captureDurationMilliseconds: durationMilliseconds ?? 0
+                    )
+                )
                 self.simulatedBracketReview = simulatedReview
-                self.lastBracketManifest = simulatedReview.manifest
+                self.lastBracketReviewSequence = sequence
+                self.lastBracketManifest = manifest
+                self.recordLatestBracketProject(
+                    manifest: manifest,
+                    reviewSequence: sequence
+                )
                 self.sequenceInFlight = false
                 self.sequenceStep = 0
                 self.activeBracketPlan = nil
@@ -1528,6 +1882,9 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
         let savedAssetIds = bracketAssetIds
         let plan = activeBracketPlan
         let captureDurationMilliseconds = activeCaptureStartTime.map(Self.elapsedMilliseconds)
+        let captureMotion = captureMotionRecorder.finishSnapshot(
+            durationMilliseconds: captureDurationMilliseconds
+        )
         let capturedAt = sequenceTimestamp.map { Date(timeIntervalSince1970: TimeInterval($0)) } ?? Date()
         let capturedFileType = rawPixelFormat == nil ? "HEIF/JPEG" : "RAW + Processed"
 
@@ -1551,7 +1908,12 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
         }
 
         if shouldFetchAssets {
-            fetchBracketAssets(plan: plan, capturedAt: capturedAt, fileType: capturedFileType)
+            fetchBracketAssets(
+                plan: plan,
+                capturedAt: capturedAt,
+                fileType: capturedFileType,
+                captureMotion: captureMotion
+            )
         } else {
             bracketAssetIds.removeAll()
             main {
@@ -1567,6 +1929,7 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
         self.rawPixelFormat = nil
         self.sequenceTimestamp = nil
         self.activeCaptureStartTime = nil
+        self.sequenceHadLocationSample = false
 
         let resolvedTerminalState: BracketSequenceState
         if let terminalState {
@@ -1593,10 +1956,52 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
         }
     }
 
-    private func fetchBracketAssets(plan: BracketPlan?, capturedAt: Date, fileType: String) {
+    private func captureDeviceSnapshot() -> BracketManifest.CaptureDeviceSnapshot? {
+        let lensLabels = availableCameraKinds.map(\.label)
+        guard let device else {
+            return BracketManifest.CaptureDeviceSnapshot(
+                logicalLensLabel: selectedCamera.label,
+                cameraName: "\(selectedCamera.label) Camera",
+                deviceType: selectedCamera.deviceType.rawValue,
+                availableLensLabels: lensLabels.isEmpty ? [selectedCamera.label] : lensLabels,
+                source: "capture session selection"
+            )
+        }
+
+        return BracketManifest.CaptureDeviceSnapshot(
+            logicalLensLabel: selectedCamera.label,
+            cameraName: device.localizedName,
+            deviceType: device.deviceType.rawValue,
+            availableLensLabels: lensLabels.isEmpty ? [selectedCamera.label] : lensLabels,
+            source: "AVCaptureDevice session"
+        )
+    }
+
+    private func captureLocationSnapshot(
+        locationSampleObserved: Bool
+    ) -> BracketManifest.CaptureLocationSnapshot {
+        let locationState = EffectiveCaptureConfiguration.LocationState(
+            authorizationStatus: locationProvider.authorizationStatus
+        )
+        return BracketManifest.CaptureLocationSnapshot.make(
+            authorizationState: locationState.displayName,
+            locationSampleObserved: locationSampleObserved,
+            source: "CoreLocation provider"
+        )
+    }
+
+    private func fetchBracketAssets(
+        plan: BracketPlan?,
+        capturedAt: Date,
+        fileType: String,
+        captureMotion: BracketManifest.CaptureMotionSnapshot
+    ) {
         let ids = self.bracketAssetIds
         guard !ids.isEmpty else { return }
-
+        let captureDevice = captureDeviceSnapshot()
+        let captureLocation = captureLocationSnapshot(
+            locationSampleObserved: sequenceHadLocationSample
+        )
         let fetchOptions = PHFetchOptions()
         let assetsResult = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: fetchOptions)
 
@@ -1625,13 +2030,23 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
             }
             self.lastBracketReviewSequence = sequence
             if let resolvedPlan = plan, let resolvedSequence = sequence {
-                self.lastBracketManifest = resolvedSequence.manifest(
+                let manifest = resolvedSequence.manifest(
                     groupIdentifier: ordered.first?.localIdentifier ?? "photos-\(Int(capturedAt.timeIntervalSince1970))",
                     source: .photos,
-                    plan: resolvedPlan
+                    plan: resolvedPlan,
+                    recipe: self.activeBracketRecipeRecord,
+                    captureDevice: captureDevice,
+                    captureLocation: captureLocation,
+                    captureMotion: captureMotion
+                )
+                self.lastBracketManifest = manifest
+                self.recordLatestBracketProject(
+                    manifest: manifest,
+                    reviewSequence: resolvedSequence
                 )
             } else {
                 self.lastBracketManifest = nil
+                self.lastBracketProject = nil
             }
             self.showImageViewer = true
         }
@@ -1787,39 +2202,39 @@ final class CameraController: NSObject, ObservableObject, @unchecked Sendable {
     @inline(__always) private func main(_ body: @escaping () -> Void) {
         if Thread.isMainThread { body() } else { DispatchQueue.main.async(execute: body) }
     }
-    
+
     private func scheduleCaptureCompletionNotification() {
         let content = UNMutableNotificationContent()
         content.title = "Bracket Capture Complete"
         content.body = "Your bracketed exposure sequence has been saved to Photos."
         content.sound = .default
-        
+
         let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 1, repeats: false)
         let request = UNNotificationRequest(
             identifier: "captureComplete-\(UUID().uuidString)",
             content: content,
             trigger: trigger
         )
-        
+
         UNUserNotificationCenter.current().add(request) { error in
             if let error {
                 Logger.camera("Notification scheduling failed: \(error.localizedDescription)")
             }
         }
     }
-    
+
     private func updateExposureUI() {
         guard let dev = self.device else { return }
         let iso = dev.iso
         let duration = CMTimeGetSeconds(dev.exposureDuration)
         let shutterText = formatShutterSpeed(duration)
-        
+
         main {
             self.currentISO = iso
             self.currentShutterSpeedText = shutterText
         }
     }
-    
+
     private func formatShutterSpeed(_ duration: Double) -> String {
         if duration >= 1.0 {
             return String(format: "%.1fs", duration)
@@ -1849,6 +2264,9 @@ extension CameraController: AVCapturePhotoCaptureDelegate {
             return
         }
         let loc = locationProvider.latestLocation
+        if loc != nil {
+            sequenceHadLocationSample = true
+        }
 
         // For bracketed capture, each photo comes through here
         // Build bracket label for this shot

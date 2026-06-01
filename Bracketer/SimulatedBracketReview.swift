@@ -4,6 +4,9 @@ struct SimulatedBracketReview: Equatable, Identifiable, Sendable {
     let plan: BracketPlan
     let assetIdentifiers: [String]
     let capturedAt: Date
+    let captureDevice: BracketManifest.CaptureDeviceSnapshot
+    let captureLocation: BracketManifest.CaptureLocationSnapshot
+    let captureMotion: BracketManifest.CaptureMotionSnapshot
 
     var id: String {
         assetIdentifiers.joined(separator: "|")
@@ -13,7 +16,10 @@ struct SimulatedBracketReview: Equatable, Identifiable, Sendable {
         SimulatedBracketReview(
             plan: plan,
             assetIdentifiers: plan.shots.map { "simulated-\($0.filenameLabel)" },
-            capturedAt: Date(timeIntervalSince1970: 0)
+            capturedAt: Date(timeIntervalSince1970: 0),
+            captureDevice: .simulatedWide,
+            captureLocation: .simulatedNotRequested,
+            captureMotion: .simulatedUnavailable
         )
     }
 
@@ -26,24 +32,47 @@ struct SimulatedBracketReview: Equatable, Identifiable, Sendable {
     }
 
     var manifest: BracketManifest {
+        manifest()
+    }
+
+    func manifest(
+        recipe: AppliedBracketRecipeRecord? = nil,
+        captureMotion resolvedCaptureMotion: BracketManifest.CaptureMotionSnapshot? = nil
+    ) -> BracketManifest {
         sequence.manifest(
             groupIdentifier: id,
             source: .simulated,
-            plan: plan
+            plan: plan,
+            recipe: recipe,
+            captureDevice: captureDevice,
+            captureLocation: captureLocation,
+            captureMotion: resolvedCaptureMotion ?? captureMotion
         )
     }
 }
 
 struct SimulatedBracketReviewView: View {
     let review: SimulatedBracketReview
+    let appliedRecipeRecord: AppliedBracketRecipeRecord?
+    let intelligenceAvailability: IntelligenceFeatureAvailability
     let onDismiss: () -> Void
 
     @State private var sequence: BracketReviewSequence
     @State private var showMetadata = false
     @State private var showDeleteConfirmation = false
+    @State private var refreshedNarrativeRun: BracketReviewNarrativeRun?
+    @State private var isGeneratingNarrative = false
+    @State private var isNarrativeDismissed = false
 
-    init(review: SimulatedBracketReview, onDismiss: @escaping () -> Void) {
+    init(
+        review: SimulatedBracketReview,
+        appliedRecipeRecord: AppliedBracketRecipeRecord? = nil,
+        intelligenceAvailability: IntelligenceFeatureAvailability = .simulatorUnsupported,
+        onDismiss: @escaping () -> Void
+    ) {
         self.review = review
+        self.appliedRecipeRecord = appliedRecipeRecord
+        self.intelligenceAvailability = intelligenceAvailability
         self.onDismiss = onDismiss
         _sequence = State(initialValue: review.sequence)
     }
@@ -65,17 +94,32 @@ struct SimulatedBracketReviewView: View {
                                 selectedShot: selectedShot,
                                 showMetadata: showMetadata,
                                 manifestJSON: manifestJSON,
-                                onPrevious: { sequence = sequence.selectingPrevious() },
-                                onNext: { sequence = sequence.selectingNext() },
-                                onToggleRepresentation: { sequence = sequence.togglingRepresentation() },
+                                onPrevious: { updateSequence(sequence.selectingPrevious()) },
+                                onNext: { updateSequence(sequence.selectingNext()) },
+                                onToggleRepresentation: { updateSequence(sequence.togglingRepresentation()) },
                                 onToggleMetadata: { showMetadata.toggle() },
                                 onDelete: { showDeleteConfirmation = true }
                             )
                         }
 
+                        SimulatedReviewProbe(
+                            identifier: "review.sequence.manifestRecipe",
+                            label: "Simulated Review Manifest Recipe",
+                            value: manifestRecipeAccessibilityValue
+                        )
+
+                        if !isNarrativeDismissed {
+                            BracketReviewNarrativeCard(
+                                run: currentNarrativeRun,
+                                isLoading: isGeneratingNarrative,
+                                onRegenerate: regenerateNarrative,
+                                onDismiss: { isNarrativeDismissed = true }
+                            )
+                        }
+
                         SimulatedReviewSequenceList(
                             sequence: sequence,
-                            onSelect: { index in sequence = sequence.selecting(index: index) }
+                            onSelect: { index in updateSequence(sequence.selecting(index: index)) }
                         )
 
                         if showMetadata, let selectedShot = sequence.selectedShot {
@@ -93,7 +137,7 @@ struct SimulatedBracketReviewView: View {
         }
         .confirmationDialog("Remove Simulated Shot?", isPresented: $showDeleteConfirmation, titleVisibility: .visible) {
             Button("Remove Shot", role: .destructive) {
-                sequence = sequence.deletingSelected()
+                updateSequence(sequence.deletingSelected())
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -140,13 +184,73 @@ struct SimulatedBracketReviewView: View {
     }
 
     private var manifestJSON: String {
-        (
-            try? sequence.manifest(
-                groupIdentifier: review.id,
-                source: .simulated,
-                plan: review.plan
-            ).jsonString()
-        ) ?? "Manifest unavailable"
+        (try? currentManifest.jsonString()) ?? "Manifest unavailable"
+    }
+
+    private var currentManifest: BracketManifest {
+        sequence.manifest(
+            groupIdentifier: review.id,
+            source: .simulated,
+            plan: review.plan,
+            recipe: appliedRecipeRecord,
+            captureDevice: review.captureDevice,
+            captureLocation: review.captureLocation,
+            captureMotion: review.captureMotion
+        )
+    }
+
+    private var manifestRecipeAccessibilityValue: String {
+        currentManifest.recipe?.accessibilityValue ?? "No applied bracket recipe"
+    }
+
+    private var narrativeRequest: BracketReviewNarrativeRequest {
+        BracketReviewNarrativeRequest.make(
+            context: BracketNarrativeContext.make(
+                manifest: currentManifest,
+                sequence: sequence,
+                intelligenceAvailability: intelligenceAvailability
+            )
+        )
+    }
+
+    private var currentNarrativeRun: BracketReviewNarrativeRun {
+        refreshedNarrativeRun ?? DeterministicBracketReviewNarrative.run(
+            for: narrativeRequest,
+            fallbackReason: "Not refreshed in this session."
+        )
+    }
+
+    private func updateSequence(_ updatedSequence: BracketReviewSequence) {
+        sequence = updatedSequence
+        refreshedNarrativeRun = nil
+    }
+
+    private func regenerateNarrative() {
+        isNarrativeDismissed = false
+        isGeneratingNarrative = true
+        let request = narrativeRequest
+        Task {
+            let run = await BracketReviewNarrativeEngine.live.response(for: request)
+            await MainActor.run {
+                refreshedNarrativeRun = run
+                isGeneratingNarrative = false
+            }
+        }
+    }
+}
+
+private struct SimulatedReviewProbe: View {
+    let identifier: String
+    let label: String
+    let value: String
+
+    var body: some View {
+        Color.clear
+            .frame(width: 1, height: 1)
+            .accessibilityElement()
+            .accessibilityLabel(label)
+            .accessibilityValue(value)
+            .accessibilityIdentifier(identifier)
     }
 }
 

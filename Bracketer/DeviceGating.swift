@@ -476,6 +476,24 @@ final class DeviceGating: ObservableObject {
             return fake
         }
 
+        #if targetEnvironment(simulator)
+        return DeviceCapabilityInputs(
+            modelIdentifier: deviceModel,
+            systemVersion: iosVersion,
+            hasBackCamera: true,
+            hasWideLens: true,
+            hasUltraWideLens: true,
+            hasTelephotoLens: true,
+            hasFlash: true,
+            supportsProRAW: true,
+            photosAuthorization: .authorized,
+            locationAuthorization: .authorized,
+            notificationAuthorization: .authorized,
+            freeStorageMB: availableStorageMB(),
+            isLowPowerModeEnabled: ProcessInfo.processInfo.isLowPowerModeEnabled,
+            isSimulator: true
+        )
+        #else
         let discovery = cameraDiscovery()
         let deviceTypes = Set(discovery.devices.map { $0.deviceType })
         let hasWide = deviceTypes.contains(.builtInWideAngleCamera)
@@ -483,21 +501,11 @@ final class DeviceGating: ObservableObject {
         let hasTelephoto = deviceTypes.contains(.builtInTelephotoCamera)
         let wideDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
 
-        #if targetEnvironment(simulator)
-        let isSimulator = true
-        #else
         let isSimulator = false
-        #endif
 
-        #if targetEnvironment(simulator)
-        let photosAuthorization: DevicePermissionState = .authorized
-        let locationAuthorization: DevicePermissionState = .authorized
-        let notificationAuthorization: DevicePermissionState = .authorized
-        #else
         let photosAuthorization = DevicePermissionState(photoAuthorizationStatus: PHPhotoLibrary.authorizationStatus(for: .addOnly))
         let locationAuthorization = DevicePermissionState(locationAuthorizationStatus: CLLocationManager().authorizationStatus)
         let notificationAuthorization: DevicePermissionState = .unknown
-        #endif
 
         return DeviceCapabilityInputs(
             modelIdentifier: deviceModel,
@@ -515,6 +523,7 @@ final class DeviceGating: ObservableObject {
             isLowPowerModeEnabled: ProcessInfo.processInfo.isLowPowerModeEnabled,
             isSimulator: isSimulator
         )
+        #endif
     }
 
     private func fakeCapabilityInputsForUITests() -> DeviceCapabilityInputs? {
